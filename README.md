@@ -91,3 +91,11 @@ php snmp_api.php help
 - **Получение информации о коммутаторе:**
   ```bash
   curl -X POST -H "Content-Type: application/json" -d '{"ip":"10.2.0.65","action":"info"}' http://localhost:8000/snmp_api.php
+
+
+### REST API
+
+http://localhost:8000/snmp_api.php
+
+![image](https://github.com/user-attachments/assets/fafaf35f-e63c-4e6c-bdca-787db7cddf82)
+
