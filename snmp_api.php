@@ -14,12 +14,26 @@ class DlinkSNMP {
         $this->readOnlyCommunity = $config['snmp']['read_only_community'];
         $this->readWriteCommunity = $config['snmp']['read_write_community'];
         
-        // Определяем количество портов только если это не вызов help
+        // Пропускаем проверку для вызова help
         if ($ip !== 'localhost') {
-            // Определяем количество портов при инициализации
-            $this->portCount = $this->getPortCount();
-            // Вычисляем количество байт для маски на основе количества портов
-            $this->maxBytes = ceil($this->portCount / 8);
+            try {
+                // Проверяем read-only community
+                echo "DEBUG: Проверка read-only community...\n";
+                $this->checkSnmpCommunity($this->readOnlyCommunity, 'read-only');
+                echo "DEBUG: Read-only community работает корректно\n";
+                
+                // Проверяем read-write community
+                echo "DEBUG: Проверка read-write community...\n";
+                $this->checkSnmpCommunity($this->readWriteCommunity, 'read-write');
+                echo "DEBUG: Read-write community работает корректно\n";
+                
+                // Определяем количество портов при инициализации
+                $this->portCount = $this->getPortCount();
+                // Вычисляем количество байт для маски на основе количества портов
+                $this->maxBytes = ceil($this->portCount / 8);
+            } catch (Exception $e) {
+                throw new Exception("Ошибка инициализации SNMP: " . $e->getMessage());
+            }
         }
     }
 
@@ -315,84 +329,159 @@ class DlinkSNMP {
         $interfaces = [];
         
         try {
+            echo "DEBUG: Начинаем получение информации об интерфейсах\n";
+            
             // Получаем описания интерфейсов
-            $cmd = "snmpwalk -v2c -c " . $this->readOnlyCommunity . " " . $this->ip . " .1.3.6.1.2.1.2.2.1.2";
-            $ifDescr = [];
-            exec($cmd, $output);
-            foreach ($output as $line) {
-                if (preg_match('/IF-MIB::ifDescr\.(\d+)\s*=\s*STRING:\s*(.+)$/', $line, $matches)) {
-                    $ifDescr[".1.3.6.1.2.1.2.2.1.2.{$matches[1]}"] = $matches[2];
-                }
+            echo "DEBUG: Пытаемся получить описания интерфейсов...\n";
+            $ifDescr = snmp2_walk($this->ip, $this->readOnlyCommunity, '.1.3.6.1.2.1.2.2.1.2');
+            if ($ifDescr === false) {
+                echo "DEBUG: Ошибка получения описаний интерфейсов\n";
+                throw new Exception("Ошибка получения описаний интерфейсов");
             }
+            echo "DEBUG: Получено описаний интерфейсов: " . count($ifDescr) . "\n";
             
             // Получаем статус интерфейсов
-            $cmd = "snmpwalk -v2c -c " . $this->readOnlyCommunity . " " . $this->ip . " .1.3.6.1.2.1.2.2.1.8";
-            $ifOperStatus = [];
-            exec($cmd, $output);
-            foreach ($output as $line) {
-                if (preg_match('/IF-MIB::ifOperStatus\.(\d+)\s*=\s*INTEGER:\s*(\w+)\((\d+)\)/', $line, $matches)) {
-                    $ifOperStatus[".1.3.6.1.2.1.2.2.1.8.{$matches[1]}"] = $matches[2];
-                }
+            echo "\nDEBUG: Пытаемся получить статус интерфейсов...\n";
+            $ifOperStatus = snmp2_walk($this->ip, $this->readOnlyCommunity, '.1.3.6.1.2.1.2.2.1.8');
+            if ($ifOperStatus === false) {
+                echo "DEBUG: Ошибка получения статуса интерфейсов\n";
+                throw new Exception("Ошибка получения статуса интерфейсов");
             }
+            echo "DEBUG: Получено статусов интерфейсов: " . count($ifOperStatus) . "\n";
             
             // Получаем скорость интерфейсов
-            $cmd = "snmpwalk -v2c -c " . $this->readOnlyCommunity . " " . $this->ip . " .1.3.6.1.2.1.2.2.1.5";
-            $ifSpeed = [];
-            exec($cmd, $output);
-            foreach ($output as $line) {
-                if (preg_match('/IF-MIB::ifSpeed\.(\d+)\s*=\s*Gauge32:\s*(\d+)/', $line, $matches)) {
-                    $ifSpeed[".1.3.6.1.2.1.2.2.1.5.{$matches[1]}"] = $matches[2];
-                }
+            echo "\nDEBUG: Пытаемся получить скорость интерфейсов...\n";
+            $ifSpeed = snmp2_walk($this->ip, $this->readOnlyCommunity, '.1.3.6.1.2.1.2.2.1.5');
+            if ($ifSpeed === false) {
+                echo "DEBUG: Ошибка получения скорости интерфейсов\n";
+                throw new Exception("Ошибка получения скорости интерфейсов");
             }
+            echo "DEBUG: Получено скоростей интерфейсов: " . count($ifSpeed) . "\n";
             
-            if ($ifDescr) {
-                foreach ($ifDescr as $oid => $value) {
-                    if (preg_match('/\.(\d+)$/', $oid, $matches)) {
-                        $index = $matches[1];
-                        $description = trim($value);
-                        
-                        $interface = [
-                            'index' => $index,
-                            'description' => $description,
-                            'type' => 'unknown'
-                        ];
-                        
-                        // Добавляем статус интерфейса
-                        if (isset($ifOperStatus[".1.3.6.1.2.1.2.2.1.8.$index"])) {
-                            $interface['status'] = $ifOperStatus[".1.3.6.1.2.1.2.2.1.8.$index"];
-                        }
-                        
-                        // Добавляем скорость интерфейса
-                        if (isset($ifSpeed[".1.3.6.1.2.1.2.2.1.5.$index"])) {
-                            $speedValue = (int)$ifSpeed[".1.3.6.1.2.1.2.2.1.5.$index"];
-                            if ($speedValue > 0) {
-                                if ($speedValue >= 1000000000) {
-                                    $interface['speed'] = round($speedValue / 1000000000, 1) . " Гбит/с";
-                                } elseif ($speedValue >= 1000000) {
-                                    $interface['speed'] = round($speedValue / 1000000) . " Мбит/с";
-                                } else {
-                                    $interface['speed'] = $speedValue . " бит/с";
-                                }
-                            } else {
-                                $interface['speed'] = "Нет линка";
-                            }
-                        }
-                        
-                        $interfaces[] = $interface;
+            // Получаем MAC-адреса интерфейсов
+            echo "\nDEBUG: Пытаемся получить MAC-адреса интерфейсов...\n";
+            $ifPhysAddress = snmp2_walk($this->ip, $this->readOnlyCommunity, '.1.3.6.1.2.1.2.2.1.6');
+            if ($ifPhysAddress === false) {
+                echo "DEBUG: Ошибка получения MAC-адресов интерфейсов\n";
+                throw new Exception("Ошибка получения MAC-адресов интерфейсов");
+            }
+            echo "DEBUG: Получено MAC-адресов интерфейсов: " . count($ifPhysAddress) . "\n";
+            
+            echo "\nDEBUG: Начинаем обработку полученных данных...\n";
+            
+            // Обрабатываем каждый интерфейс
+            for ($i = 0; $i < count($ifDescr); $i++) {
+                echo "\nDEBUG: Обработка интерфейса с индексом: " . ($i + 1) . "\n";
+                
+                // Извлекаем описание
+                $description = preg_replace('/^STRING: "(.+)"$/', '$1', $ifDescr[$i]);
+                echo "DEBUG: Описание интерфейса: $description\n";
+                
+                $interface = [
+                    'index' => $i + 1,
+                    'description' => $description,
+                    'type' => 'unknown'
+                ];
+                
+                // Добавляем статус интерфейса
+                if (isset($ifOperStatus[$i])) {
+                    $status = preg_replace('/^INTEGER: (\d+)$/', '$1', $ifOperStatus[$i]);
+                    $interface['status'] = $this->getInterfaceStatus((int)$status);
+                    echo "DEBUG: Статус интерфейса: {$interface['status']}\n";
+                }
+                
+                // Добавляем скорость интерфейса
+                if (isset($ifSpeed[$i])) {
+                    $speed = preg_replace('/^Gauge32: (\d+)$/', '$1', $ifSpeed[$i]);
+                    $interface['speed'] = $this->formatSpeed((int)$speed);
+                    echo "DEBUG: Скорость интерфейса: {$interface['speed']}\n";
+                }
+                
+                // Добавляем MAC-адрес
+                if (isset($ifPhysAddress[$i])) {
+                    $mac = preg_replace('/^Hex-STRING: (.+)$/', '$1', $ifPhysAddress[$i]);
+                    if ($mac !== '00 00 00 00 00 00') {
+                        $interface['mac'] = trim($mac);
+                        echo "DEBUG: MAC-адрес интерфейса: {$interface['mac']}\n";
                     }
                 }
+                
+                // Определяем тип интерфейса
+                $index = $i + 1;
+                if ($index <= 24) {
+                    $interface['type'] = 'physical';
+                } elseif ($index <= 26) {
+                    $interface['type'] = 'combo';
+                } elseif (strpos($description, '802.1Q') === 0) {
+                    $interface['type'] = 'vlan';
+                } else {
+                    $interface['type'] = 'system';
+                }
+                echo "DEBUG: Тип интерфейса: {$interface['type']}\n";
+                
+                $interfaces[] = $interface;
             }
+            
+            echo "\nDEBUG: Всего обработано интерфейсов: " . count($interfaces) . "\n";
+            
         } catch (Exception $e) {
+            echo "DEBUG: Произошла ошибка: " . $e->getMessage() . "\n";
             throw new Exception("Ошибка получения информации об интерфейсах: " . $e->getMessage());
         }
         
         return $interfaces;
     }
 
+    // Вспомогательная функция для форматирования скорости
+    private function formatSpeed($speedValue) {
+        if ($speedValue <= 0) {
+            return "Нет линка";
+        }
+        if ($speedValue >= 1000000000) {
+            return round($speedValue / 1000000000, 1) . " Гбит/с";
+        }
+        if ($speedValue >= 1000000) {
+            return round($speedValue / 1000000) . " Мбит/с";
+        }
+        return $speedValue . " бит/с";
+    }
+
+    // Вспомогательная функция для получения статуса интерфейса
+    private function getInterfaceStatus($status) {
+        $statuses = [
+            1 => "UP",
+            2 => "DOWN",
+            3 => "TESTING",
+            4 => "UNKNOWN",
+            5 => "DORMANT",
+            6 => "NOT PRESENT",
+            7 => "LOWER LAYER DOWN"
+        ];
+        return isset($statuses[$status]) ? $statuses[$status] : "UNKNOWN";
+    }
+
     public function getApiDocs() {
         $docs = [
             'description' => 'API для управления коммутаторами D-Link через SNMP',
             'version' => '1.0.0',
+            'security' => [
+                'description' => 'Проверка SNMP community строк',
+                'checks' => [
+                    'read_only' => [
+                        'description' => 'Проверка read-only community через запрос sysDescr',
+                        'oid' => '.1.3.6.1.2.1.1.1.0'
+                    ],
+                    'read_write' => [
+                        'description' => 'Проверка read-write community через запрос и установку sysContact',
+                        'oid' => '.1.3.6.1.2.1.1.4.0'
+                    ]
+                ],
+                'error_handling' => [
+                    'read_only_fail' => 'Ошибка проверки read-only community',
+                    'read_write_fail_read' => 'Ошибка проверки read-write community (чтение)',
+                    'read_write_fail_write' => 'Ошибка проверки read-write community (запись)'
+                ]
+            ],
             'endpoints' => [
                 'info' => [
                     'description' => 'Получение информации о коммутаторе',
@@ -576,13 +665,44 @@ class DlinkSNMP {
         
         return $output;
     }
+
+    private function checkSnmpCommunity($community, $type = 'read-only') {
+        try {
+            // Проверяем доступность коммутатора через sysDescr (для read-only)
+            if ($type === 'read-only') {
+                $result = snmp2_get($this->ip, $community, '.1.3.6.1.2.1.1.1.0');
+                if ($result === false) {
+                    throw new Exception("Ошибка проверки read-only community");
+                }
+            } else {
+                // Для read-write пробуем получить и установить sysContact
+                // Сначала сохраняем текущее значение
+                $currentContact = snmp2_get($this->ip, $community, '.1.3.6.1.2.1.1.4.0');
+                if ($currentContact === false) {
+                    throw new Exception("Ошибка проверки read-write community (чтение)");
+                }
+                
+                // Пробуем установить то же самое значение обратно
+                $result = snmp2_set($this->ip, $community, '.1.3.6.1.2.1.1.4.0', 's', $currentContact);
+                if ($result === false) {
+                    throw new Exception("Ошибка проверки read-write community (запись)");
+                }
+            }
+            
+            return true;
+        } catch (Exception $e) {
+            throw new Exception("Ошибка проверки " . $type . " community: " . $e->getMessage());
+        }
+    }
 }
 
 // Обновляем CLI интерфейс
 if (php_sapi_name() === 'cli') {
     if ($argc < 2) {
         die("Использование: php snmp_api.php <ip> <action> [ports] [vlan] [tagged]\n" .
-            "Для получения полной документации используйте: php snmp_api.php help\n");
+            "Для получения полной документации используйте: php snmp_api.php help\n\n" .
+            "Примечание: При каждом обращении к коммутатору выполняется автоматическая проверка\n" .
+            "доступности и корректности SNMP community строк.\n");
     }
 
     try {
@@ -645,19 +765,23 @@ if (php_sapi_name() === 'cli') {
 
             case 'interfaces':
                 $interfaces = $snmp->getInterfaces();
-                echo "=== Интерфейсы коммутатора ===\n";
-                echo "\nФизические порты:\n";
+                echo "=== Интерфейсы коммутатора ===\n\n";
+                
+                echo "Физические порты:\n";
                 echo "----------------\n";
                 foreach ($interfaces as $interface) {
-                    if ($interface['index'] <= 26) {  // Физические порты
-                        $portType = $interface['index'] <= 24 ? "Медный порт" : "Combo порт";
+                    if ($interface['type'] === 'physical' || $interface['type'] === 'combo') {
+                        $portType = $interface['type'] === 'physical' ? "Медный порт" : "Combo порт";
                         echo "Порт {$interface['index']} ($portType)\n";
-                        echo "Статус: " . (isset($interface['status']) ? strtoupper($interface['status']) : 'НЕИЗВЕСТНО') . "\n";
+                        echo "Описание: {$interface['description']}\n";
+                        if (isset($interface['status'])) {
+                            echo "Статус: {$interface['status']}\n";
+                        }
                         if (isset($interface['speed'])) {
                             echo "Скорость: {$interface['speed']}\n";
                         }
                         if (isset($interface['mac'])) {
-                            echo "MAC: " . implode(':', str_split($interface['mac'], 2)) . "\n";
+                            echo "MAC: {$interface['mac']}\n";
                         }
                         echo "----------------\n";
                     }
@@ -666,11 +790,10 @@ if (php_sapi_name() === 'cli') {
                 echo "\nVLAN интерфейсы:\n";
                 echo "----------------\n";
                 foreach ($interfaces as $interface) {
-                    if ($interface['index'] >= 1024 && $interface['index'] < 5000) {  // VLAN интерфейсы
-                        if (preg_match('/Tag (\d+)$/', $interface['description'], $matches)) {
-                            echo "VLAN {$matches[1]}\n";
-                        } else {
-                            echo $interface['description'] . "\n";
+                    if ($interface['type'] === 'vlan') {
+                        echo "Интерфейс: {$interface['description']}\n";
+                        if (isset($interface['status'])) {
+                            echo "Статус: {$interface['status']}\n";
                         }
                         echo "----------------\n";
                     }
@@ -679,8 +802,14 @@ if (php_sapi_name() === 'cli') {
                 echo "\nСистемные интерфейсы:\n";
                 echo "----------------\n";
                 foreach ($interfaces as $interface) {
-                    if ($interface['index'] >= 5000) {  // Системные интерфейсы
-                        echo $interface['description'] . "\n";
+                    if ($interface['type'] === 'system') {
+                        echo "Интерфейс: {$interface['description']}\n";
+                        if (isset($interface['status'])) {
+                            echo "Статус: {$interface['status']}\n";
+                        }
+                        if (isset($interface['mac'])) {
+                            echo "MAC: {$interface['mac']}\n";
+                        }
                         echo "----------------\n";
                     }
                 }
@@ -707,11 +836,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         if ($input['action'] === 'help') {
-            $snmp = new DlinkSNMP('localhost'); // IP не важен для help
+            $snmp = new DlinkSNMP('localhost');
             $docs = $snmp->getApiDocs();
             echo json_encode([
                 'success' => true,
-                'data' => $docs
+                'data' => $docs,
+                'note' => 'При каждом обращении к коммутатору выполняется автоматическая проверка доступности и корректности SNMP community строк.'
             ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
             exit;
         }
@@ -755,7 +885,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 break;
                 
             case 'interfaces':
-                $result = $snmp->getInterfaces();
+                $interfaces = $snmp->getInterfaces();
+                echo "=== Интерфейсы коммутатора ===\n\n";
+                
+                echo "Физические порты:\n";
+                echo "----------------\n";
+                foreach ($interfaces as $interface) {
+                    if ($interface['type'] === 'physical' || $interface['type'] === 'combo') {
+                        $portType = $interface['type'] === 'physical' ? "Медный порт" : "Combo порт";
+                        echo "Порт {$interface['index']} ($portType)\n";
+                        echo "Описание: {$interface['description']}\n";
+                        if (isset($interface['status'])) {
+                            echo "Статус: {$interface['status']}\n";
+                        }
+                        if (isset($interface['speed'])) {
+                            echo "Скорость: {$interface['speed']}\n";
+                        }
+                        if (isset($interface['mac'])) {
+                            echo "MAC: {$interface['mac']}\n";
+                        }
+                        echo "----------------\n";
+                    }
+                }
+                
+                echo "\nVLAN интерфейсы:\n";
+                echo "----------------\n";
+                foreach ($interfaces as $interface) {
+                    if ($interface['type'] === 'vlan') {
+                        echo "Интерфейс: {$interface['description']}\n";
+                        if (isset($interface['status'])) {
+                            echo "Статус: {$interface['status']}\n";
+                        }
+                        echo "----------------\n";
+                    }
+                }
+                
+                echo "\nСистемные интерфейсы:\n";
+                echo "----------------\n";
+                foreach ($interfaces as $interface) {
+                    if ($interface['type'] === 'system') {
+                        echo "Интерфейс: {$interface['description']}\n";
+                        if (isset($interface['status'])) {
+                            echo "Статус: {$interface['status']}\n";
+                        }
+                        if (isset($interface['mac'])) {
+                            echo "MAC: {$interface['mac']}\n";
+                        }
+                        echo "----------------\n";
+                    }
+                }
                 break;
                 
             default:
@@ -1165,7 +1343,55 @@ HTML;
                 break;
                 
             case 'interfaces':
-                $result = $snmp->getInterfaces();
+                $interfaces = $snmp->getInterfaces();
+                echo "=== Интерфейсы коммутатора ===\n\n";
+                
+                echo "Физические порты:\n";
+                echo "----------------\n";
+                foreach ($interfaces as $interface) {
+                    if ($interface['type'] === 'physical' || $interface['type'] === 'combo') {
+                        $portType = $interface['type'] === 'physical' ? "Медный порт" : "Combo порт";
+                        echo "Порт {$interface['index']} ($portType)\n";
+                        echo "Описание: {$interface['description']}\n";
+                        if (isset($interface['status'])) {
+                            echo "Статус: {$interface['status']}\n";
+                        }
+                        if (isset($interface['speed'])) {
+                            echo "Скорость: {$interface['speed']}\n";
+                        }
+                        if (isset($interface['mac'])) {
+                            echo "MAC: {$interface['mac']}\n";
+                        }
+                        echo "----------------\n";
+                    }
+                }
+                
+                echo "\nVLAN интерфейсы:\n";
+                echo "----------------\n";
+                foreach ($interfaces as $interface) {
+                    if ($interface['type'] === 'vlan') {
+                        echo "Интерфейс: {$interface['description']}\n";
+                        if (isset($interface['status'])) {
+                            echo "Статус: {$interface['status']}\n";
+                        }
+                        echo "----------------\n";
+                    }
+                }
+                
+                echo "\nСистемные интерфейсы:\n";
+                echo "----------------\n";
+                foreach ($interfaces as $interface) {
+                    if ($interface['type'] === 'system') {
+                        echo "Интерфейс: {$interface['description']}\n";
+                        if (isset($interface['status'])) {
+                            echo "Статус: {$interface['status']}\n";
+                        }
+                        if (isset($interface['mac'])) {
+                            echo "MAC: {$interface['mac']}\n";
+                        }
+                        echo "----------------\n";
+                    }
+                }
                 break;
                 
             default:
@@ -1191,4 +1417,4 @@ HTML;
         'error' => 'Метод не поддерживается'
     ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
 }
-?> 
+?>
