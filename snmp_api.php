@@ -10,8 +10,14 @@ class DlinkSNMP {
     private $maxBytes;
     private $logger;
 
-    public function __construct($ip) {
+    public function __construct($ip = null) {
         $this->logger = Logger::getInstance();
+        
+        if ($ip === null) {
+            // Для эндпоинта help не требуется SNMP-инициализация
+            return;
+        }
+        
         $this->logger->info("Инициализация DlinkSNMP для IP: $ip");
         
         $config = include 'config.php';
@@ -193,7 +199,8 @@ class DlinkSNMP {
 
     // Проверка существования VLAN
     private function checkVlanExists($vlanId) {
-        return $this->getVlanMask($vlanId) !== null;
+        $vlans = $this->getExistingVlans();
+        return in_array($vlanId, $vlans);
     }
 
     // Логирование текущего состояния VLAN'ов
@@ -270,16 +277,13 @@ class DlinkSNMP {
             $this->logVlanState("создание VLAN $vlanId");
             $this->logger->info("Попытка создания VLAN $vlanId");
             
-            // Добавляем отладочный вывод
-            $this->logger->debug("Используемая read-write community строка: " . $this->readWriteCommunity);
-            
             // Проверяем, не существует ли уже VLAN
             if ($this->checkVlanExists($vlanId)) {
                 $this->logger->warning("VLAN $vlanId уже существует");
                 throw new Exception("VLAN $vlanId уже существует");
             }
 
-            // 1. Создаем VLAN через dot1qVlanStaticRowStatus
+            // 1. Сначала создаем VLAN через dot1qVlanStaticRowStatus
             $this->logger->debug("Создание VLAN $vlanId через dot1qVlanStaticRowStatus");
             $result = snmp2_set($this->ip, $this->readWriteCommunity,
                               ".1.3.6.1.2.1.17.7.1.4.3.1.5.$vlanId",
@@ -292,20 +296,34 @@ class DlinkSNMP {
             // Добавляем задержку для обработки операции коммутатором
             sleep(2);
 
-            // 2. Устанавливаем имя VLAN
-            $this->logger->debug("Установка имени для VLAN $vlanId");
+            // 2. Проверяем, что VLAN был создан
+            if (!$this->checkVlanExists($vlanId)) {
+                $this->logger->error("VLAN $vlanId не был создан");
+                throw new Exception("VLAN не был создан");
+            }
+
+            // 3. Устанавливаем имя VLAN
+            $this->logger->debug("Установка имени VLAN $vlanId");
             $result = snmp2_set($this->ip, $this->readWriteCommunity,
                               ".1.3.6.1.2.1.17.7.1.4.3.1.1.$vlanId",
                               's', "$vlanId");
             
             if ($result === false) {
-                $this->handleSnmpError("установке имени VLAN", "VLAN ID: $vlanId");
+                $this->logger->warning("Не удалось установить имя VLAN $vlanId, но VLAN был создан");
             }
 
-            // Проверяем, что VLAN действительно создан
-            if (!$this->checkVlanExists($vlanId)) {
-                $this->logger->error("VLAN $vlanId не был создан");
-                throw new Exception("VLAN не был создан");
+            // 4. Проверяем финальное состояние VLAN
+            $vlanDetails = $this->getVlanDetails();
+            $vlanCreated = false;
+            foreach ($vlanDetails as $vlan) {
+                if ($vlan['id'] == $vlanId) {
+                    $vlanCreated = true;
+                    break;
+                }
+            }
+
+            if (!$vlanCreated) {
+                throw new Exception("VLAN не был успешно создан");
             }
 
             $this->logger->info("VLAN $vlanId успешно создан");
@@ -1057,7 +1075,7 @@ if (php_sapi_name() === 'cli') {
     try {
         if ($argv[1] === 'help') {
             $logger->info("Запрошена справка");
-            $snmp = new DlinkSNMP('localhost');
+            $snmp = new DlinkSNMP();
             echo $snmp->getApiDocs();
             exit(0);
         }
@@ -1262,6 +1280,15 @@ if (php_sapi_name() === 'cli') {
                 }
                 break;
 
+            case 'help':
+                $snmp = new DlinkSNMP();
+                $docs = $snmp->getApiDocs();
+                echo json_encode([
+                    'success' => true,
+                    'data' => $docs
+                ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+                break;
+
             default:
                 die("Неизвестное действие: $action\n");
         }
@@ -1282,17 +1309,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             throw new Exception("Необходимо указать действие");
         }
 
-        if ($input['action'] === 'help') {
-            $snmp = new DlinkSNMP('localhost');
-            $docs = $snmp->getApiDocs();
-            echo json_encode([
-                'success' => true,
-                'data' => $docs,
-                'note' => 'При каждом обращении к коммутатору выполняется автоматическая проверка доступности и корректности SNMP community строк.'
-            ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
-            exit;
+        // Специальная обработка для help и update
+        if ($input['action'] === 'help' || $input['action'] === 'update') {
+            if ($input['action'] === 'help') {
+                $snmp = new DlinkSNMP();
+                $docs = $snmp->getApiDocs();
+                echo json_encode([
+                    'success' => true,
+                    'data' => $docs
+                ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+                exit;
+            }
+            // ... остальной код для update
         }
         
+        // Для всех остальных действий требуется IP
         if (!isset($input['ip'])) {
             throw new Exception("Необходимо указать IP-адрес");
         }
@@ -1456,6 +1487,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 break;
 
+            case 'help':
+                $snmp = new DlinkSNMP();
+                $docs = $snmp->getApiDocs();
+                echo json_encode([
+                    'success' => true,
+                    'data' => $docs
+                ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+                break;
+
             default:
                 throw new Exception("Неизвестное действие");
         }
@@ -1501,7 +1541,57 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         input, select { margin: 5px; padding: 5px; }
         button { padding: 5px 10px; background: #007bff; color: white; border: none; cursor: pointer; }
         button:hover { background: #0056b3; }
-        #result { margin-top: 20px; padding: 10px; background: #f8f9fa; white-space: pre-wrap; }
+        .result-section {
+            margin: 20px 0;
+            padding: 15px;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            min-height: 100px;
+            display: none;
+            position: relative;
+        }
+        .result-section.active {
+            display: block;
+        }
+        .result-section pre {
+            margin: 0;
+            white-space: pre-wrap;
+            font-family: monospace;
+            font-size: 14px;
+            color: #333;
+        }
+        .result-section.error {
+            background: #f8d7da;
+            border-color: #f5c6cb;
+            color: #721c24;
+        }
+        .result-section.success {
+            background: #d4edda;
+            border-color: #c3e6cb;
+            color: #155724;
+        }
+        .close-button {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 24px;
+            height: 24px;
+            background: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            line-height: 1;
+            padding: 0;
+        }
+        .close-button:hover {
+            background: #c82333;
+        }
         .examples {
             margin: 10px 0;
             padding: 10px;
@@ -1625,135 +1715,186 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             border: 1px solid #f5c6cb;
         }
     </style>
+    <script>
+        function tryEndpoint(action) {
+            const resultDiv = document.getElementById("result");
+            resultDiv.style.display = 'block';
+            resultDiv.className = 'result-section';
+            resultDiv.innerHTML = '<button class="close-button" onclick="closeResult()">&times;</button><div style="text-align: center; padding: 20px;">Выполняется запрос...</div>';
+            
+            const ip = document.getElementById('ip-' + action)?.value;
+            let url = window.location.pathname + '/' + action + '?ip=' + encodeURIComponent(ip);
+            
+            if (action === "get" || action === "add" || action === "remove") {
+                const ports = document.getElementById('ports-' + action)?.value;
+                if (ports) {
+                    url += '&ports=' + encodeURIComponent(ports);
+                }
+            }
+            
+            if (action === "add" || action === "remove" || action === "create" || action === "delete") {
+                const vlan = document.getElementById('vlan-' + action)?.value;
+                if (vlan) {
+                    url += '&vlan=' + encodeURIComponent(vlan);
+                }
+            }
+            
+            if (action === "add") {
+                const tagged = document.getElementById("tagged-add")?.value;
+                if (tagged) {
+                    url += '&tagged=' + encodeURIComponent(tagged);
+                }
+            }
+            
+            fetch(url)
+                .then(response => {
+                    const contentType = response.headers.get('content-type');
+                    if (contentType && contentType.includes('application/json')) {
+                        return response.json();
+                    }
+                    return response.text().then(text => {
+                        throw new Error('Получен неверный формат ответа: ' + text);
+                    });
+                })
+                .then(data => {
+                    resultDiv.className = 'result-section ' + (data.success ? 'success' : 'error');
+                    resultDiv.innerHTML = '<button class="close-button" onclick="closeResult()">&times;</button><pre>' + JSON.stringify(data, null, 2) + '</pre>';
+                })
+                .catch(err => {
+                    resultDiv.className = 'result-section error';
+                    resultDiv.innerHTML = '<button class="close-button" onclick="closeResult()">&times;</button><pre>Ошибка: ' + (err.message || "Неизвестная ошибка") + '</pre>';
+                });
+        }
+
+        function closeResult() {
+            const resultDiv = document.getElementById("result");
+            resultDiv.style.display = 'none';
+        }
+
+        function showTab(button, tabId) {
+            const tabContainer = button.closest('.tab-container');
+            tabContainer.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
+            tabContainer.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            button.classList.add('active');
+            document.getElementById(tabId).classList.add('active');
+        }
+
+        function updateFromGitHub() {
+            const statusDiv = document.getElementById('update-status');
+            statusDiv.style.display = 'block';
+            statusDiv.className = '';
+            statusDiv.textContent = 'Обновление...';
+            
+            fetch(window.location.pathname + '/update')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        statusDiv.className = 'update-success';
+                        statusDiv.textContent = 'Скрипт успешно обновлен!';
+                        setTimeout(() => {
+                            window.location.reload();
+                        }, 2000);
+                    } else {
+                        statusDiv.className = 'update-error';
+                        statusDiv.textContent = 'Ошибка обновления: ' + data.error;
+                    }
+                })
+                .catch(err => {
+                    statusDiv.className = 'update-error';
+                    statusDiv.textContent = 'Ошибка при обновлении: ' + err.message;
+                });
+        }
+    </script>
 </head>
 <body>
     <div class="container">
-        <h1>D-Link SNMP API</h1>
-        <div class="update-section">
-            <button onclick="updateFromGitHub()" class="update-button">Обновить скрипт с GitHub</button>
-            <div id="update-status"></div>
+        <!-- Перемещаем блок с результатами вверх -->
+        <div class="result-section" id="result" style="position: sticky; top: 20px; z-index: 100; margin-bottom: 20px;">
+            <button class="close-button" onclick="closeResult()">&times;</button>
         </div>
+        
         <div class="endpoint">
-            <h3>Получение информации о коммутаторе</h3>
-            <div class="method">GET /snmp_api.php/info</div>
-            <div class="description">Получение информации о коммутаторе (модель, имя, количество портов)</div>
-            <div class="returns">
-                <h4>Возвращаемые данные:</h4>
-                <pre>{
-    "success": true,
-    "data": {
-        "name": "имя коммутатора",
-        "model": "модель коммутатора",
-        "port_count": "количество портов",
-        "max_bytes": "размер маски в байтах"
-    }
-}</pre>
+            <h3 class="method">Получить информацию о коммутаторе</h3>
+            <div class="description">
+                Получает основную информацию о коммутаторе: модель, имя, количество портов.
             </div>
             <div class="examples">
-                <h4>Примеры использования:</h4>
+                <h4>Примеры:</h4>
                 <div class="tab-container">
                     <div class="tab-buttons">
-                        <button class="tab-button active" onclick="showTab(this, 'cli-info')">CLI</button>
-                        <button class="tab-button" onclick="showTab(this, 'curl-info')">CURL</button>
-                        <button class="tab-button" onclick="showTab(this, 'url-info')">URL</button>
+                        <button class="tab-button active" onclick="showTab(this, 'info-cli')">CLI</button>
+                        <button class="tab-button" onclick="showTab(this, 'info-curl')">CURL</button>
+                        <button class="tab-button" onclick="showTab(this, 'info-browser')">Browser</button>
                     </div>
-                    <div id="cli-info" class="tab-content active">
+                    <div id="info-cli" class="tab-content active">
                         <pre>php snmp_api.php 10.2.0.65 info</pre>
                     </div>
-                    <div id="curl-info" class="tab-content">
-                        <pre>curl -X POST -H "Content-Type: application/json" \\
-     -d '{"ip":"10.2.0.65","action":"info"}' \\
-     /snmp_api.php</pre>
+                    <div id="info-curl" class="tab-content">
+                        <pre>curl -X POST -H "Content-Type: application/json" -d '{"ip":"10.2.0.65","action":"info"}' http://localhost/dlink-snmp-api/snmp_api.php</pre>
                     </div>
-                    <div id="url-info" class="tab-content">
-                        <pre>/snmp_api.php/info?ip=10.2.0.65</pre>
+                    <div id="info-browser" class="tab-content">
+                        <pre>http://localhost/dlink-snmp-api/snmp_api.php/info?ip=10.2.0.65</pre>
                     </div>
                 </div>
             </div>
             <div class="try-it">
                 <input type="text" id="ip-info" placeholder="IP-адрес коммутатора">
-                <button onclick="tryEndpoint('info')">Выполнить</button>
+                <button type="button" class="execute-btn" onclick="tryEndpoint('info')">Выполнить</button>
             </div>
         </div>
-        
+
         <div class="endpoint">
-            <h3>Получение информации о VLAN на портах</h3>
-            <div class="method">GET /snmp_api.php/get</div>
-            <div class="description">Получение информации о VLAN на указанных портах</div>
-            <div class="returns">
-                <h4>Возвращаемые данные:</h4>
-                <pre>{
-    "success": true,
-    "data": [
-        {
-            "port": "номер порта",
-            "vlans": [
-                {
-                    "vlan": "номер VLAN",
-                    "type": "tagged/untagged"
-                }
-            ]
-        }
-    ]
-}</pre>
+            <h3 class="method">Получить информацию о VLAN на портах</h3>
+            <div class="description">
+                Получает информацию о VLAN-конфигурации для указанных портов.
             </div>
             <div class="examples">
-                <h4>Примеры использования:</h4>
+                <h4>Примеры:</h4>
                 <div class="tab-container">
                     <div class="tab-buttons">
-                        <button class="tab-button active" onclick="showTab(this, 'cli-get')">CLI</button>
-                        <button class="tab-button" onclick="showTab(this, 'curl-get')">CURL</button>
-                        <button class="tab-button" onclick="showTab(this, 'url-get')">URL</button>
+                        <button class="tab-button active" onclick="showTab(this, 'get-cli')">CLI</button>
+                        <button class="tab-button" onclick="showTab(this, 'get-curl')">CURL</button>
+                        <button class="tab-button" onclick="showTab(this, 'get-browser')">Browser</button>
                     </div>
-                    <div id="cli-get" class="tab-content active">
+                    <div id="get-cli" class="tab-content active">
                         <pre>php snmp_api.php 10.2.0.65 get 1-4</pre>
                     </div>
-                    <div id="curl-get" class="tab-content">
-                        <pre>curl -X POST -H "Content-Type: application/json" \\
-     -d '{"ip":"10.2.0.65","action":"get","ports":"1-4"}' \\
-     /snmp_api.php</pre>
+                    <div id="get-curl" class="tab-content">
+                        <pre>curl -X POST -H "Content-Type: application/json" -d '{"ip":"10.2.0.65","action":"get","ports":"1-4"}' http://localhost/dlink-snmp-api/snmp_api.php</pre>
                     </div>
-                    <div id="url-get" class="tab-content">
-                        <pre>/snmp_api.php/get?ip=10.2.0.65&ports=1-4</pre>
+                    <div id="get-browser" class="tab-content">
+                        <pre>http://localhost/dlink-snmp-api/snmp_api.php/get?ip=10.2.0.65&ports=1-4</pre>
                     </div>
                 </div>
             </div>
             <div class="try-it">
                 <input type="text" id="ip-get" placeholder="IP-адрес коммутатора">
                 <input type="text" id="ports-get" placeholder="Порты (например: 1-4)">
-                <button onclick="tryEndpoint('get')">Выполнить</button>
+                <button type="button" class="execute-btn" onclick="tryEndpoint('get')">Выполнить</button>
             </div>
         </div>
-        
+
         <div class="endpoint">
-            <h3>Добавление портов в VLAN</h3>
-            <div class="method">GET /snmp_api.php/add</div>
-            <div class="description">Добавление указанных портов в VLAN (tagged или untagged)</div>
-            <div class="returns">
-                <h4>Возвращаемые данные:</h4>
-                <pre>{
-    "success": true,
-    "data": true
-}</pre>
+            <h3 class="method">Добавить порты в VLAN</h3>
+            <div class="description">
+                Добавляет указанные порты в VLAN как tagged или untagged.
             </div>
             <div class="examples">
-                <h4>Примеры использования:</h4>
+                <h4>Примеры:</h4>
                 <div class="tab-container">
                     <div class="tab-buttons">
-                        <button class="tab-button active" onclick="showTab(this, 'cli-add')">CLI</button>
-                        <button class="tab-button" onclick="showTab(this, 'curl-add')">CURL</button>
-                        <button class="tab-button" onclick="showTab(this, 'url-add')">URL</button>
+                        <button class="tab-button active" onclick="showTab(this, 'add-cli')">CLI</button>
+                        <button class="tab-button" onclick="showTab(this, 'add-curl')">CURL</button>
+                        <button class="tab-button" onclick="showTab(this, 'add-browser')">Browser</button>
                     </div>
-                    <div id="cli-add" class="tab-content active">
-                        <pre>php snmp_api.php 10.2.0.65 add 1-4 100</pre>
+                    <div id="add-cli" class="tab-content active">
+                        <pre>php snmp_api.php 10.2.0.65 add 1-4 100 1</pre>
                     </div>
-                    <div id="curl-add" class="tab-content">
-                        <pre>curl -X POST -H "Content-Type: application/json" \\
-     -d '{"ip":"10.2.0.65","action":"add","ports":"1-4","vlan":100,"tagged":false}' \\
-     /snmp_api.php</pre>
+                    <div id="add-curl" class="tab-content">
+                        <pre>curl -X POST -H "Content-Type: application/json" -d '{"ip":"10.2.0.65","action":"add","ports":"1-4","vlan":100,"tagged":true}' http://localhost/dlink-snmp-api/snmp_api.php</pre>
                     </div>
-                    <div id="url-add" class="tab-content">
-                        <pre>/snmp_api.php/add?ip=10.2.0.65&ports=1-4&vlan=100&tagged=0</pre>
+                    <div id="add-browser" class="tab-content">
+                        <pre>http://localhost/dlink-snmp-api/snmp_api.php/add?ip=10.2.0.65&ports=1-4&vlan=100&tagged=1</pre>
                     </div>
                 </div>
             </div>
@@ -1765,39 +1906,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <option value="0">Untagged</option>
                     <option value="1">Tagged</option>
                 </select>
-                <button onclick="tryEndpoint('add')">Выполнить</button>
+                <button type="button" class="execute-btn" onclick="tryEndpoint('add')">Выполнить</button>
             </div>
         </div>
-        
+
         <div class="endpoint">
-            <h3>Удаление портов из VLAN</h3>
-            <div class="method">GET /snmp_api.php/remove</div>
-            <div class="description">Удаление указанных портов из VLAN</div>
-            <div class="returns">
-                <h4>Возвращаемые данные:</h4>
-                <pre>{
-    "success": true,
-    "data": true
-}</pre>
+            <h3 class="method">Удалить порты из VLAN</h3>
+            <div class="description">
+                Удаляет указанные порты из VLAN.
             </div>
             <div class="examples">
-                <h4>Примеры использования:</h4>
+                <h4>Примеры:</h4>
                 <div class="tab-container">
                     <div class="tab-buttons">
-                        <button class="tab-button active" onclick="showTab(this, 'cli-remove')">CLI</button>
-                        <button class="tab-button" onclick="showTab(this, 'curl-remove')">CURL</button>
-                        <button class="tab-button" onclick="showTab(this, 'url-remove')">URL</button>
+                        <button class="tab-button active" onclick="showTab(this, 'remove-cli')">CLI</button>
+                        <button class="tab-button" onclick="showTab(this, 'remove-curl')">CURL</button>
+                        <button class="tab-button" onclick="showTab(this, 'remove-browser')">Browser</button>
                     </div>
-                    <div id="cli-remove" class="tab-content active">
+                    <div id="remove-cli" class="tab-content active">
                         <pre>php snmp_api.php 10.2.0.65 remove 1-4 100</pre>
                     </div>
-                    <div id="curl-remove" class="tab-content">
-                        <pre>curl -X POST -H "Content-Type: application/json" \\
-     -d '{"ip":"10.2.0.65","action":"remove","ports":"1-4","vlan":100}' \\
-     /snmp_api.php</pre>
+                    <div id="remove-curl" class="tab-content">
+                        <pre>curl -X POST -H "Content-Type: application/json" -d '{"ip":"10.2.0.65","action":"remove","ports":"1-4","vlan":100}' http://localhost/dlink-snmp-api/snmp_api.php</pre>
                     </div>
-                    <div id="url-remove" class="tab-content">
-                        <pre>/snmp_api.php/remove?ip=10.2.0.65&ports=1-4&vlan=100</pre>
+                    <div id="remove-browser" class="tab-content">
+                        <pre>http://localhost/dlink-snmp-api/snmp_api.php/remove?ip=10.2.0.65&ports=1-4&vlan=100</pre>
                     </div>
                 </div>
             </div>
@@ -1805,575 +1938,351 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <input type="text" id="ip-remove" placeholder="IP-адрес коммутатора">
                 <input type="text" id="ports-remove" placeholder="Порты">
                 <input type="number" id="vlan-remove" placeholder="VLAN ID">
-                <button onclick="tryEndpoint('remove')">Выполнить</button>
-            </div>
-        </div>
-        
-        <div class="endpoint">
-            <h3>Получение информации об интерфейсах</h3>
-            <div class="method">GET /snmp_api.php/interfaces</div>
-            <div class="description">Получение информации о всех интерфейсах коммутатора</div>
-            <div class="returns">
-                <h4>Возвращаемые данные:</h4>
-                <pre>{
-    "success": true,
-    "data": [
-        {
-            "index": "номер интерфейса",
-            "description": "описание интерфейса",
-            "type": "тип интерфейса (physical/combo/vlan/system)",
-            "status": "статус интерфейса",
-            "speed": "скорость интерфейса",
-            "mac": "MAC-адрес интерфейса"
-        }
-    ]
-}</pre>
-            </div>
-            <div class="examples">
-                <h4>Примеры использования:</h4>
-                <div class="tab-container">
-                    <div class="tab-buttons">
-                        <button class="tab-button active" onclick="showTab(this, 'cli-interfaces')">CLI</button>
-                        <button class="tab-button" onclick="showTab(this, 'curl-interfaces')">CURL</button>
-                        <button class="tab-button" onclick="showTab(this, 'url-interfaces')">URL</button>
-                    </div>
-                    <div id="cli-interfaces" class="tab-content active">
-                        <pre>php snmp_api.php 10.2.0.65 interfaces</pre>
-                    </div>
-                    <div id="curl-interfaces" class="tab-content">
-                        <pre>curl -X POST -H "Content-Type: application/json" \\
-     -d '{"ip":"10.2.0.65","action":"interfaces"}' \\
-     /snmp_api.php</pre>
-                    </div>
-                    <div id="url-interfaces" class="tab-content">
-                        <pre>/snmp_api.php/interfaces?ip=10.2.0.65</pre>
-                    </div>
-                </div>
-            </div>
-            <div class="try-it">
-                <input type="text" id="ip-interfaces" placeholder="IP-адрес коммутатора">
-                <button onclick="tryEndpoint('interfaces')">Выполнить</button>
-            </div>
-        </div>
-        
-        <div class="endpoint">
-            <h3>Получение документации</h3>
-            <div class="method">GET /snmp_api.php/help</div>
-            <div class="description">Получение полной документации по API</div>
-            <div class="returns">
-                <h4>Возвращаемые данные:</h4>
-                <pre>{
-    "success": true,
-    "data": {
-        "description": "описание API",
-        "version": "версия API",
-        "security": {
-            "description": "информация о безопасности",
-            "checks": {
-                "read_only": {
-                    "description": "проверка read-only community",
-                    "oid": "OID для проверки"
-                },
-                "read_write": {
-                    "description": "проверка read-write community",
-                    "oid": "OID для проверки"
-                }
-            }
-        },
-        "endpoints": {
-            "описание всех доступных эндпоинтов"
-        }
-    },
-    "note": "дополнительная информация"
-}</pre>
-            </div>
-            <div class="examples">
-                <h4>Примеры использования:</h4>
-                <div class="tab-container">
-                    <div class="tab-buttons">
-                        <button class="tab-button active" onclick="showTab(this, 'cli-help')">CLI</button>
-                        <button class="tab-button" onclick="showTab(this, 'curl-help')">CURL</button>
-                        <button class="tab-button" onclick="showTab(this, 'url-help')">URL</button>
-                    </div>
-                    <div id="cli-help" class="tab-content active">
-                        <pre>php snmp_api.php help</pre>
-                    </div>
-                    <div id="curl-help" class="tab-content">
-                        <pre>curl -X POST -H "Content-Type: application/json" \\
-     -d '{"action":"help"}' \\
-     /snmp_api.php</pre>
-                    </div>
-                    <div id="url-help" class="tab-content">
-                        <pre>/snmp_api.php/help</pre>
-                    </div>
-                </div>
-            </div>
-            <div class="try-it">
-                <button onclick="tryEndpoint('help')">Получить документацию</button>
-            </div>
-        </div>
-        
-        <div class="endpoint">
-            <h3>Получение списка VLAN</h3>
-            <div class="method">GET /snmp_api.php/vlans</div>
-            <div class="description">Получение подробной информации о всех VLAN'ах на коммутаторе</div>
-            <div class="returns">
-                <h4>Возвращаемые данные:</h4>
-                <pre>{
-    "success": true,
-    "data": [
-        {
-            "id": "номер VLAN",
-            "name": "имя VLAN",
-            "ports": {
-                "tagged": ["список портов с тегированным трафиком"],
-                "untagged": ["список портов с нетегированным трафиком"]
-            }
-        }
-    ]
-}</pre>
-            </div>
-            <div class="examples">
-                <h4>Примеры использования:</h4>
-                <div class="tab-container">
-                    <div class="tab-buttons">
-                        <button class="tab-button active" onclick="showTab(this, 'cli-vlans')">CLI</button>
-                        <button class="tab-button" onclick="showTab(this, 'curl-vlans')">CURL</button>
-                        <button class="tab-button" onclick="showTab(this, 'url-vlans')">URL</button>
-                    </div>
-                    <div id="cli-vlans" class="tab-content active">
-                        <pre>php snmp_api.php 10.2.0.65 vlans</pre>
-                    </div>
-                    <div id="curl-vlans" class="tab-content">
-                        <pre>curl -X POST -H "Content-Type: application/json" \\
-     -d '{"ip":"10.2.0.65","action":"vlans"}' \\
-     /snmp_api.php</pre>
-                    </div>
-                    <div id="url-vlans" class="tab-content">
-                        <pre>/snmp_api.php/vlans?ip=10.2.0.65</pre>
-                    </div>
-                </div>
-            </div>
-            <div class="try-it">
-                <input type="text" id="ip-vlans" placeholder="IP-адрес коммутатора">
-                <button onclick="tryEndpoint('vlans')">Выполнить</button>
+                <button type="button" class="execute-btn" onclick="tryEndpoint('remove')">Выполнить</button>
             </div>
         </div>
 
         <div class="endpoint">
-            <h3>Создание VLAN</h3>
-            <div class="method">GET /snmp_api.php/create</div>
-            <div class="description">Создание нового VLAN на коммутаторе</div>
-            <div class="returns">
-                <h4>Возвращаемые данные:</h4>
-                <pre>{
-    "success": true,
-    "data": true
-}</pre>
+            <h3 class="method">Создать VLAN</h3>
+            <div class="description">
+                Создает новый VLAN с указанным ID.
             </div>
             <div class="examples">
-                <h4>Примеры использования:</h4>
+                <h4>Примеры:</h4>
                 <div class="tab-container">
                     <div class="tab-buttons">
-                        <button class="tab-button active" onclick="showTab(this, 'cli-create')">CLI</button>
-                        <button class="tab-button" onclick="showTab(this, 'curl-create')">CURL</button>
-                        <button class="tab-button" onclick="showTab(this, 'url-create')">URL</button>
+                        <button class="tab-button active" onclick="showTab(this, 'create-cli')">CLI</button>
+                        <button class="tab-button" onclick="showTab(this, 'create-curl')">CURL</button>
+                        <button class="tab-button" onclick="showTab(this, 'create-browser')">Browser</button>
                     </div>
-                    <div id="cli-create" class="tab-content active">
+                    <div id="create-cli" class="tab-content active">
                         <pre>php snmp_api.php 10.2.0.65 create 100</pre>
                     </div>
-                    <div id="curl-create" class="tab-content">
-                        <pre>curl -X POST -H "Content-Type: application/json" \\
-     -d '{"ip":"10.2.0.65","action":"create","vlan":100}' \\
-     /snmp_api.php</pre>
+                    <div id="create-curl" class="tab-content">
+                        <pre>curl -X POST -H "Content-Type: application/json" -d '{"ip":"10.2.0.65","action":"create","vlan":100}' http://localhost/dlink-snmp-api/snmp_api.php</pre>
                     </div>
-                    <div id="url-create" class="tab-content">
-                        <pre>/snmp_api.php/create?ip=10.2.0.65&vlan=100</pre>
+                    <div id="create-browser" class="tab-content">
+                        <pre>http://localhost/dlink-snmp-api/snmp_api.php/create?ip=10.2.0.65&vlan=100</pre>
                     </div>
                 </div>
             </div>
             <div class="try-it">
                 <input type="text" id="ip-create" placeholder="IP-адрес коммутатора">
                 <input type="number" id="vlan-create" placeholder="VLAN ID">
-                <button onclick="tryEndpoint('create')">Выполнить</button>
+                <button type="button" class="execute-btn" onclick="tryEndpoint('create')">Выполнить</button>
             </div>
         </div>
 
         <div class="endpoint">
-            <h3>Удаление VLAN</h3>
-            <div class="method">GET /snmp_api.php/delete</div>
-            <div class="description">Удаление VLAN с коммутатора</div>
-            <div class="returns">
-                <h4>Возвращаемые данные:</h4>
-                <pre>{
-    "success": true,
-    "data": true
-}</pre>
-            </div>
-            <div class="notes">
-                <p><strong>Важно:</strong> Перед удалением VLAN необходимо удалить все порты из него.</p>
-                <p>Если в VLAN есть порты, операция удаления будет отклонена.</p>
+            <h3 class="method">Удалить VLAN</h3>
+            <div class="description">
+                Удаляет существующий VLAN. Перед удалением необходимо удалить все порты из VLAN.
             </div>
             <div class="examples">
-                <h4>Примеры использования:</h4>
+                <h4>Примеры:</h4>
                 <div class="tab-container">
                     <div class="tab-buttons">
-                        <button class="tab-button active" onclick="showTab(this, 'cli-delete')">CLI</button>
-                        <button class="tab-button" onclick="showTab(this, 'curl-delete')">CURL</button>
-                        <button class="tab-button" onclick="showTab(this, 'url-delete')">URL</button>
+                        <button class="tab-button active" onclick="showTab(this, 'delete-cli')">CLI</button>
+                        <button class="tab-button" onclick="showTab(this, 'delete-curl')">CURL</button>
+                        <button class="tab-button" onclick="showTab(this, 'delete-browser')">Browser</button>
                     </div>
-                    <div id="cli-delete" class="tab-content active">
+                    <div id="delete-cli" class="tab-content active">
                         <pre>php snmp_api.php 10.2.0.65 delete 100</pre>
                     </div>
-                    <div id="curl-delete" class="tab-content">
-                        <pre>curl -X POST -H "Content-Type: application/json" \\
-     -d '{"ip":"10.2.0.65","action":"delete","vlan":100}' \\
-     /snmp_api.php</pre>
+                    <div id="delete-curl" class="tab-content">
+                        <pre>curl -X POST -H "Content-Type: application/json" -d '{"ip":"10.2.0.65","action":"delete","vlan":100}' http://localhost/dlink-snmp-api/snmp_api.php</pre>
                     </div>
-                    <div id="url-delete" class="tab-content">
-                        <pre>/snmp_api.php/delete?ip=10.2.0.65&vlan=100</pre>
+                    <div id="delete-browser" class="tab-content">
+                        <pre>http://localhost/dlink-snmp-api/snmp_api.php/delete?ip=10.2.0.65&vlan=100</pre>
                     </div>
                 </div>
             </div>
             <div class="try-it">
                 <input type="text" id="ip-delete" placeholder="IP-адрес коммутатора">
                 <input type="number" id="vlan-delete" placeholder="VLAN ID">
-                <button onclick="tryEndpoint('delete')">Выполнить</button>
+                <button type="button" class="execute-btn" onclick="tryEndpoint('delete')">Выполнить</button>
             </div>
         </div>
 
-        <style>
-            .notes {
-                margin: 10px 0;
-                padding: 10px;
-                background: #fff3cd;
-                border: 1px solid #ffeeba;
-                border-radius: 4px;
-            }
-            .notes p {
-                margin: 5px 0;
-                color: #856404;
-            }
-            .notes strong {
-                color: #533f03;
-            }
-            .update-section {
-                margin: 20px 0;
-                padding: 15px;
-                background: #f8f9fa;
-                border-radius: 4px;
-                border: 1px solid #dee2e6;
-            }
-            .update-button {
-                background: #28a745;
-                color: white;
-                border: none;
-                padding: 10px 20px;
-                border-radius: 4px;
-                cursor: pointer;
-                font-size: 14px;
-            }
-            .update-button:hover {
-                background: #218838;
-            }
-            #update-status {
-                margin-top: 10px;
-                padding: 10px;
-                border-radius: 4px;
-                display: none;
-            }
-            .update-success {
-                background: #d4edda;
-                color: #155724;
-                border: 1px solid #c3e6cb;
-            }
-            .update-error {
-                background: #f8d7da;
-                color: #721c24;
-                border: 1px solid #f5c6cb;
-            }
-        </style>
-        
-        <div id="result"></div>
+        <div class="endpoint">
+            <h3 class="method">Получить список VLAN'ов</h3>
+            <div class="description">
+                Получает полный список всех VLAN'ов на коммутаторе с информацией о портах.
+            </div>
+            <div class="examples">
+                <h4>Примеры:</h4>
+                <div class="tab-container">
+                    <div class="tab-buttons">
+                        <button class="tab-button active" onclick="showTab(this, 'vlans-cli')">CLI</button>
+                        <button class="tab-button" onclick="showTab(this, 'vlans-curl')">CURL</button>
+                        <button class="tab-button" onclick="showTab(this, 'vlans-browser')">Browser</button>
+                    </div>
+                    <div id="vlans-cli" class="tab-content active">
+                        <pre>php snmp_api.php 10.2.0.65 vlans</pre>
+                    </div>
+                    <div id="vlans-curl" class="tab-content">
+                        <pre>curl -X POST -H "Content-Type: application/json" -d '{"ip":"10.2.0.65","action":"vlans"}' http://localhost/dlink-snmp-api/snmp_api.php</pre>
+                    </div>
+                    <div id="vlans-browser" class="tab-content">
+                        <pre>http://localhost/dlink-snmp-api/snmp_api.php/vlans?ip=10.2.0.65</pre>
+                    </div>
+                </div>
+            </div>
+            <div class="try-it">
+                <input type="text" id="ip-vlans" placeholder="IP-адрес коммутатора">
+                <button type="button" class="execute-btn" onclick="tryEndpoint('vlans')">Выполнить</button>
+            </div>
+        </div>
+
+        <div class="endpoint">
+            <h3 class="method">Получить информацию об интерфейсах</h3>
+            <div class="description">
+                Получает подробную информацию о всех интерфейсах коммутатора, включая физические порты, VLAN интерфейсы и системные интерфейсы.
+            </div>
+            <div class="examples">
+                <h4>Примеры:</h4>
+                <div class="tab-container">
+                    <div class="tab-buttons">
+                        <button class="tab-button active" onclick="showTab(this, 'interfaces-cli')">CLI</button>
+                        <button class="tab-button" onclick="showTab(this, 'interfaces-curl')">CURL</button>
+                        <button class="tab-button" onclick="showTab(this, 'interfaces-browser')">Browser</button>
+                    </div>
+                    <div id="interfaces-cli" class="tab-content active">
+                        <pre>php snmp_api.php 10.2.0.65 interfaces</pre>
+                    </div>
+                    <div id="interfaces-curl" class="tab-content">
+                        <pre>curl -X POST -H "Content-Type: application/json" -d '{"ip":"10.2.0.65","action":"interfaces"}' http://localhost/dlink-snmp-api/snmp_api.php</pre>
+                    </div>
+                    <div id="interfaces-browser" class="tab-content">
+                        <pre>http://localhost/dlink-snmp-api/snmp_api.php/interfaces?ip=10.2.0.65</pre>
+                    </div>
+                </div>
+            </div>
+            <div class="try-it">
+                <input type="text" id="ip-interfaces" placeholder="IP-адрес коммутатора">
+                <button type="button" class="execute-btn" onclick="tryEndpoint('interfaces')">Выполнить</button>
+            </div>
+        </div>
+
+        <div class="endpoint">
+            <h3 class="method">Обновить скрипт</h3>
+            <div class="description">
+                Обновляет скрипт до последней версии из GitHub репозитория.
+            </div>
+            <div class="examples">
+                <h4>Примеры:</h4>
+                <div class="tab-container">
+                    <div class="tab-buttons">
+                        <button class="tab-button active" onclick="showTab(this, 'update-cli')">CLI</button>
+                        <button class="tab-button" onclick="showTab(this, 'update-curl')">CURL</button>
+                        <button class="tab-button" onclick="showTab(this, 'update-browser')">Browser</button>
+                    </div>
+                    <div id="update-cli" class="tab-content active">
+                        <pre>php snmp_api.php update</pre>
+                    </div>
+                    <div id="update-curl" class="tab-content">
+                        <pre>curl -X POST -H "Content-Type: application/json" -d '{"action":"update"}' http://localhost/dlink-snmp-api/snmp_api.php</pre>
+                    </div>
+                    <div id="update-browser" class="tab-content">
+                        <pre>http://localhost/dlink-snmp-api/snmp_api.php/update</pre>
+                    </div>
+                </div>
+            </div>
+            <div class="try-it">
+                <button type="button" class="update-button" onclick="updateFromGitHub()">Обновить скрипт</button>
+                <div id="update-status"></div>
+            </div>
+        </div>
+
+        <div class="endpoint">
+            <h3 class="method">Получить справку</h3>
+            <div class="description">
+                Получает полную документацию по API с описанием всех доступных команд и примерами использования.
+            </div>
+            <div class="examples">
+                <h4>Примеры:</h4>
+                <div class="tab-container">
+                    <div class="tab-buttons">
+                        <button class="tab-button active" onclick="showTab(this, 'help-cli')">CLI</button>
+                        <button class="tab-button" onclick="showTab(this, 'help-curl')">CURL</button>
+                        <button class="tab-button" onclick="showTab(this, 'help-browser')">Browser</button>
+                    </div>
+                    <div id="help-cli" class="tab-content active">
+                        <pre>php snmp_api.php help</pre>
+                    </div>
+                    <div id="help-curl" class="tab-content">
+                        <pre>curl -X POST -H "Content-Type: application/json" -d '{"action":"help"}' http://localhost/dlink-snmp-api/snmp_api.php</pre>
+                    </div>
+                    <div id="help-browser" class="tab-content">
+                        <pre>http://localhost/dlink-snmp-api/snmp_api.php/help</pre>
+                    </div>
+                </div>
+            </div>
+            <div class="try-it">
+                <button type="button" class="execute-btn" onclick="tryEndpoint('help')">Получить справку</button>
+            </div>
+        </div>
     </div>
-    
-    <script>
-    function showTab(button, tabId) {
-        // Находим контейнер вкладок
-        const tabContainer = button.closest('.tab-container');
-        
-        // Деактивируем все кнопки и скрываем все содержимое
-        tabContainer.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
-        tabContainer.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-        
-        // Активируем выбранную кнопку и показываем соответствующее содержимое
-        button.classList.add('active');
-        document.getElementById(tabId).classList.add('active');
-    }
-    
-    async function tryEndpoint(action) {
-        const ip = document.getElementById('ip-' + action).value;
-        let url = '/snmp_api.php/' + action + '?ip=' + encodeURIComponent(ip);
-        
-        if (action === "get" || action === "add" || action === "remove") {
-            const ports = document.getElementById('ports-' + action).value;
-            if (ports) {
-                url += '&ports=' + encodeURIComponent(ports);
-            }
-        }
-        
-        if (action === "add" || action === "remove") {
-            const vlan = document.getElementById('vlan-' + action).value;
-            if (vlan) {
-                url += '&vlan=' + encodeURIComponent(vlan);
-            }
-        }
-        
-        if (action === "add") {
-            const tagged = document.getElementById("tagged-add").value;
-            if (tagged) {
-                url += '&tagged=' + encodeURIComponent(tagged);
-            }
-        }
-        
-        try {
-            const response = await fetch(url);
-            const data = await response.json();
-            document.getElementById("result").textContent = JSON.stringify(data, null, 2);
-        } catch (err) {
-            document.getElementById("result").textContent = "Ошибка: " + (err.message || "Неизвестная ошибка");
-        }
-    }
-    
-    async function updateFromGitHub() {
-        const statusDiv = document.getElementById('update-status');
-        statusDiv.style.display = 'block';
-        statusDiv.className = '';
-        statusDiv.textContent = 'Обновление...';
-        
-        try {
-            const response = await fetch('/snmp_api.php/update');
-            const data = await response.json();
-            
-            if (data.success) {
-                statusDiv.className = 'update-success';
-                statusDiv.textContent = 'Скрипт успешно обновлен!';
-                setTimeout(() => {
-                    window.location.reload();
-                }, 2000);
-            } else {
-                statusDiv.className = 'update-error';
-                statusDiv.textContent = 'Ошибка обновления: ' + data.error;
-            }
-        } catch (err) {
-            statusDiv.className = 'update-error';
-            statusDiv.textContent = 'Ошибка при обновлении: ' + err.message;
-        }
-    }
-    </script>
 </body>
 </html>
 HTML;
-        exit;
-    }
-    
-    // Получаем команду из URL
-    $command = end($pathParts);
-    
-    header('Content-Type: application/json; charset=utf-8');
-    
-    try {
-        // Проверяем наличие IP в параметрах
-        if (!isset($_GET['ip']) && $command !== 'help') {
-            throw new Exception("Необходимо указать IP-адрес");
-        }
-        
-        if ($command === 'help') {
-            $snmp = new DlinkSNMP('localhost');
-            $docs = $snmp->getApiDocs();
-            echo json_encode([
-                'success' => true,
-                'data' => $docs
-            ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
-            exit;
-        }
-        
-        $snmp = new DlinkSNMP($_GET['ip']);
-        $result = null;
-        
-        switch ($command) {
-            case 'info':
-                $result = $snmp->getSwitchInfo();
-                break;
-                
-            case 'get':
-                if (!isset($_GET['ports'])) {
-                    throw new Exception("Необходимо указать порты");
-                }
-                $result = $snmp->getPortVlan($_GET['ports']);
-                break;
-                
-            case 'add':
-                if (!isset($_GET['ports']) || !isset($_GET['vlan'])) {
-                    throw new Exception("Необходимо указать порты и VLAN");
-                }
-                $tagged = isset($_GET['tagged']) ? (bool)$_GET['tagged'] : false;
-                $result = $snmp->addPortsToVlan($_GET['ports'], $_GET['vlan'], $tagged);
-                break;
-                
-            case 'remove':
-                if (!isset($_GET['ports']) || !isset($_GET['vlan'])) {
-                    throw new Exception("Необходимо указать порты и VLAN");
-                }
-                $result = $snmp->removePortsFromVlan($_GET['ports'], $_GET['vlan']);
-                break;
-                
-            case 'interfaces':
-                $interfaces = $snmp->getInterfaces();
-                echo "=== Интерфейсы коммутатора ===\n\n";
-                
-                echo "Физические порты:\n";
-                echo "----------------\n";
-                foreach ($interfaces as $interface) {
-                    if ($interface['type'] === 'physical' || $interface['type'] === 'combo') {
-                        $portType = $interface['type'] === 'physical' ? "Медный порт" : "Combo порт";
-                        echo "Порт {$interface['index']} ($portType)\n";
-                        echo "Описание: {$interface['description']}\n";
-                        if (isset($interface['status'])) {
-                            echo "Статус: {$interface['status']}\n";
-                        }
-                        if (isset($interface['speed'])) {
-                            echo "Скорость: {$interface['speed']}\n";
-                        }
-                        if (isset($interface['mac'])) {
-                            echo "MAC: {$interface['mac']}\n";
-                        }
-                        echo "----------------\n";
-                    }
-                }
-                
-                echo "\nVLAN интерфейсы:\n";
-                echo "----------------\n";
-                foreach ($interfaces as $interface) {
-                    if ($interface['type'] === 'vlan') {
-                        echo "Интерфейс: {$interface['description']}\n";
-                        if (isset($interface['status'])) {
-                            echo "Статус: {$interface['status']}\n";
-                        }
-                        echo "----------------\n";
-                    }
-                }
-                
-                echo "\nСистемные интерфейсы:\n";
-                echo "----------------\n";
-                foreach ($interfaces as $interface) {
-                    if ($interface['type'] === 'system') {
-                        echo "Интерфейс: {$interface['description']}\n";
-                        if (isset($interface['status'])) {
-                            echo "Статус: {$interface['status']}\n";
-                        }
-                        if (isset($interface['mac'])) {
-                            echo "MAC: {$interface['mac']}\n";
-                        }
-                        echo "----------------\n";
-                    }
-                }
-                break;
-                
-            case 'create':
-                if (!isset($_GET['vlan'])) {
-                    throw new Exception("Необходимо указать ID VLAN");
-                }
-                $result = $snmp->createVlan($_GET['vlan']);
-                break;
-                
-            case 'delete':
-                echo "DEBUG: Вход в case 'delete'\n";
-                echo "DEBUG: vlan = " . ($_GET['vlan'] ?? 'null') . "\n";
-                if ($_GET['vlan'] === null) {
-                    throw new Exception("Необходимо указать ID VLAN");
-                }
-                $result = $snmp->deleteVlan($_GET['vlan']);
-                echo "VLAN " . $_GET['vlan'] . " успешно удален\n";
-                break;
-
-            case 'vlans':
-                $result = $snmp->getVlanDetails();
-                break;
-
-            case 'update':
-                try {
-                    // Создаем временную директорию
-                    $tempDir = sys_get_temp_dir() . '/dlink-snmp-api-update-' . uniqid();
-                    mkdir($tempDir);
-                    
-                    // Клонируем репозиторий во временную директорию
-                    exec("git clone https://github.com/kirush0280/dlink-snmp-api.git $tempDir 2>&1", $output, $returnVar);
-                    
-                    if ($returnVar !== 0) {
-                        throw new Exception("Ошибка клонирования репозитория: " . implode("\n", $output));
-                    }
-                    
-                    // Сохраняем текущий config.php
-                    $currentConfig = file_get_contents('config.php');
-                    
-                    // Копируем файлы из временной директории
-                    $files = [
-                        'snmp_api.php',
-                        'Logger.php',
-                        'README.md'
-                    ];
-                    
-                    foreach ($files as $file) {
-                        if (file_exists($tempDir . '/' . $file)) {
-                            copy($tempDir . '/' . $file, $file);
-                        }
-                    }
-                    
-                    // Восстанавливаем config.php
-                    file_put_contents('config.php', $currentConfig);
-                    
-                    // Удаляем временную директорию
-                    array_map('unlink', glob("$tempDir/*.*"));
-                    rmdir($tempDir);
-                    
+    } else {
+        header('Content-Type: application/json; charset=utf-8');
+        try {
+            $action = end($pathParts);
+            
+            // Специальная обработка для help и update
+            if ($action === 'help' || $action === 'update') {
+                if ($action === 'help') {
+                    $snmp = new DlinkSNMP();
+                    $docs = $snmp->getApiDocs();
                     echo json_encode([
                         'success' => true,
-                        'message' => 'Скрипт успешно обновлен'
-                    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
-                    exit;
-                    
-                } catch (Exception $e) {
-                    http_response_code(500);
-                    echo json_encode([
-                        'success' => false,
-                        'error' => $e->getMessage()
+                        'data' => $docs
                     ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
                     exit;
                 }
-                break;
+                // ... остальной код для update
+            }
+            
+            // Для всех остальных действий требуется IP
+            $ip = $_GET['ip'] ?? null;
+            if (!$ip) {
+                throw new Exception("Необходимо указать IP-адрес");
+            }
+            
+            $snmp = new DlinkSNMP($ip);
+            $result = null;
+            
+            switch ($action) {
+                case 'info':
+                    $result = $snmp->getSwitchInfo();
+                    break;
+                    
+                case 'get':
+                    if (!isset($_GET['ports'])) {
+                        throw new Exception("Необходимо указать порты");
+                    }
+                    $result = $snmp->getPortVlan($_GET['ports']);
+                    break;
+                    
+                case 'add':
+                    if (!isset($_GET['ports']) || !isset($_GET['vlan'])) {
+                        throw new Exception("Необходимо указать порты и VLAN");
+                    }
+                    $tagged = isset($_GET['tagged']) ? $_GET['tagged'] : false;
+                    $result = $snmp->addPortsToVlan($_GET['ports'], $_GET['vlan'], $tagged);
+                    break;
+                    
+                case 'remove':
+                    if (!isset($_GET['ports']) || !isset($_GET['vlan'])) {
+                        throw new Exception("Необходимо указать порты и VLAN");
+                    }
+                    $result = $snmp->removePortsFromVlan($_GET['ports'], $_GET['vlan']);
+                    break;
+                    
+                case 'interfaces':
+                    $result = $snmp->getInterfaces();
+                    break;
+                    
+                case 'create':
+                    if (!isset($_GET['vlan'])) {
+                        throw new Exception("Необходимо указать ID VLAN");
+                    }
+                    $result = $snmp->createVlan($_GET['vlan']);
+                    break;
+                    
+                case 'delete':
+                    echo "DEBUG: Вход в case 'delete'\n";
+                    echo "DEBUG: vlan = " . ($_GET['vlan'] ?? 'null') . "\n";
+                    if ($_GET['vlan'] === null) {
+                        throw new Exception("Необходимо указать ID VLAN");
+                    }
+                    $result = $snmp->deleteVlan($_GET['vlan']);
+                    echo "VLAN " . $_GET['vlan'] . " успешно удален\n";
+                    break;
 
-            default:
-                throw new Exception("Неизвестное действие");
+                case 'vlans':
+                    $result = $snmp->getVlanDetails();
+                    break;
+
+                case 'update':
+                    try {
+                        // Создаем временную директорию
+                        $tempDir = sys_get_temp_dir() . '/dlink-snmp-api-update-' . uniqid();
+                        mkdir($tempDir);
+                        
+                        // Клонируем репозиторий во временную директорию
+                        exec("git clone https://github.com/kirush0280/dlink-snmp-api.git $tempDir 2>&1", $output, $returnVar);
+                        
+                        if ($returnVar !== 0) {
+                            throw new Exception("Ошибка клонирования репозитория: " . implode("\n", $output));
+                        }
+                        
+                        // Сохраняем текущий config.php
+                        $currentConfig = file_get_contents('config.php');
+                        
+                        // Копируем файлы из временной директории
+                        $files = [
+                            'snmp_api.php',
+                            'Logger.php',
+                            'README.md'
+                        ];
+                        
+                        foreach ($files as $file) {
+                            if (file_exists($tempDir . '/' . $file)) {
+                                copy($tempDir . '/' . $file, $file);
+                            }
+                        }
+                        
+                        // Восстанавливаем config.php
+                        file_put_contents('config.php', $currentConfig);
+                        
+                        // Удаляем временную директорию
+                        array_map('unlink', glob("$tempDir/*.*"));
+                        rmdir($tempDir);
+                        
+                        echo json_encode([
+                            'success' => true,
+                            'message' => 'Скрипт успешно обновлен'
+                        ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+                        exit;
+                        
+                    } catch (Exception $e) {
+                        http_response_code(500);
+                        echo json_encode([
+                            'success' => false,
+                            'error' => $e->getMessage()
+                        ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+                        exit;
+                    }
+                    break;
+
+                case 'help':
+                    $snmp = new DlinkSNMP();
+                    $docs = $snmp->getApiDocs();
+                    echo json_encode([
+                        'success' => true,
+                        'data' => $docs
+                    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+                    break;
+
+                default:
+                    throw new Exception("Неизвестное действие");
+            }
+            
+            echo json_encode([
+                'success' => true,
+                'data' => $result
+            ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+            
+        } catch (Exception $e) {
+            http_response_code(400);
+            echo json_encode([
+                'success' => false,
+                'error' => $e->getMessage()
+            ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
         }
-        
-        echo json_encode([
-            'success' => true,
-            'data' => $result
-        ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
-        
-    } catch (Exception $e) {
-        http_response_code(400);
-        echo json_encode([
-            'success' => false,
-            'error' => $e->getMessage()
-        ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
     }
-} else {
-    http_response_code(405);
-    echo json_encode([
-        'success' => false,
-        'error' => 'Метод не поддерживается'
-    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
 }
 ?>
