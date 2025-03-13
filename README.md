@@ -10,6 +10,8 @@ API для управления коммутаторами D-Link через SNM
    ```bash
    git clone https://github.com/ваш-репозиторий/dlink-snmp-api.git
    cd dlink-snmp-api
+   mkdir logs
+   установите права на папку с логами
    ```
 
 ## Использование
