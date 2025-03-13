@@ -1,5 +1,6 @@
 <?php
 require 'config.php';
+require 'Logger.php';
 
 class DlinkSNMP {
     private $ip;
@@ -7,8 +8,12 @@ class DlinkSNMP {
     private $readWriteCommunity;
     private $portCount;
     private $maxBytes;
+    private $logger;
 
     public function __construct($ip) {
+        $this->logger = Logger::getInstance();
+        $this->logger->info("Инициализация DlinkSNMP для IP: $ip");
+        
         $config = include 'config.php';
         $this->ip = $ip;
         $this->readOnlyCommunity = $config['snmp']['read_only_community'];
@@ -18,20 +23,24 @@ class DlinkSNMP {
         if ($ip !== 'localhost') {
             try {
                 // Проверяем read-only community
-                echo "DEBUG: Проверка read-only community...\n";
+                $this->logger->debug("Проверка read-only community...");
                 $this->checkSnmpCommunity($this->readOnlyCommunity, 'read-only');
-                echo "DEBUG: Read-only community работает корректно\n";
+                $this->logger->info("Read-only community работает корректно");
                 
                 // Проверяем read-write community
-                echo "DEBUG: Проверка read-write community...\n";
+                $this->logger->debug("Проверка read-write community...");
                 $this->checkSnmpCommunity($this->readWriteCommunity, 'read-write');
-                echo "DEBUG: Read-write community работает корректно\n";
+                $this->logger->info("Read-write community работает корректно");
                 
                 // Определяем количество портов при инициализации
                 $this->portCount = $this->getPortCount();
+                $this->logger->info("Определено количество портов: {$this->portCount}");
+                
                 // Вычисляем количество байт для маски на основе количества портов
                 $this->maxBytes = ceil($this->portCount / 8);
+                $this->logger->debug("Установлен размер маски: {$this->maxBytes} байт");
             } catch (Exception $e) {
+                $this->logger->error("Ошибка инициализации SNMP: " . $e->getMessage());
                 throw new Exception("Ошибка инициализации SNMP: " . $e->getMessage());
             }
         }
@@ -113,9 +122,250 @@ class DlinkSNMP {
         return null;
     }
 
+    // Получение подробной информации о VLAN'ах
+    public function getVlanDetails() {
+        $vlans = [];
+        $result = snmp2_real_walk($this->ip, $this->readOnlyCommunity, ".1.3.6.1.2.1.17.7.1.4.3.1.1");
+        
+        if (is_array($result)) {
+            foreach ($result as $oid => $value) {
+                if (preg_match('/\.(\d+)$/', $oid, $matches)) {
+                    $vlanId = $matches[1];
+                    $vlanInfo = [
+                        'id' => $vlanId,
+                        'name' => preg_replace('/STRING: "(.*)"/', '$1', $value),
+                        'ports' => [
+                            'tagged' => [],
+                            'untagged' => []
+                        ]
+                    ];
+                    
+                    // Получаем маски для tagged и untagged портов
+                    $taggedMask = $this->getVlanMask($vlanId, 'tagged');
+                    $untaggedMask = $this->getVlanMask($vlanId, 'untagged');
+                    
+                    // Анализируем маски и определяем порты
+                    if ($taggedMask) {
+                        for ($port = 1; $port <= $this->portCount; $port++) {
+                            $byteIndex = floor(($port - 1) / 8);
+                            $bitInByte = 7 - (($port - 1) % 8);
+                            $bitMask = 1 << $bitInByte;
+                            
+                            if ($byteIndex < count($taggedMask)) {
+                                if (hexdec($taggedMask[$byteIndex]) & $bitMask) {
+                                    // Проверяем, не является ли порт untagged
+                                    $isUntagged = false;
+                                    if ($untaggedMask && $byteIndex < count($untaggedMask)) {
+                                        if (hexdec($untaggedMask[$byteIndex]) & $bitMask) {
+                                            $isUntagged = true;
+                                        }
+                                    }
+                                    
+                                    if (!$isUntagged) {
+                                        $vlanInfo['ports']['tagged'][] = $port;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    if ($untaggedMask) {
+                        for ($port = 1; $port <= $this->portCount; $port++) {
+                            $byteIndex = floor(($port - 1) / 8);
+                            $bitInByte = 7 - (($port - 1) % 8);
+                            $bitMask = 1 << $bitInByte;
+                            
+                            if ($byteIndex < count($untaggedMask)) {
+                                if (hexdec($untaggedMask[$byteIndex]) & $bitMask) {
+                                    $vlanInfo['ports']['untagged'][] = $port;
+                                }
+                            }
+                        }
+                    }
+                    
+                    $vlans[] = $vlanInfo;
+                }
+            }
+        }
+        
+        return $vlans;
+    }
+
     // Проверка существования VLAN
     private function checkVlanExists($vlanId) {
         return $this->getVlanMask($vlanId) !== null;
+    }
+
+    // Логирование текущего состояния VLAN'ов
+    private function logVlanState($operation) {
+        $this->logger->info("=== Текущее состояние VLAN'ов перед операцией: $operation ===");
+        
+        // Получаем список всех VLAN'ов
+        $vlans = $this->getVlanDetails();
+        
+        foreach ($vlans as $vlan) {
+            $this->logger->info("VLAN {$vlan['id']} ({$vlan['name']})");
+            $this->logger->info("  Tagged порты: " . (empty($vlan['ports']['tagged']) ? "нет" : implode(", ", $vlan['ports']['tagged'])));
+            $this->logger->info("  Untagged порты: " . (empty($vlan['ports']['untagged']) ? "нет" : implode(", ", $vlan['ports']['untagged'])));
+        }
+        $this->logger->info("================================================");
+    }
+
+    private function validateVlanId($vlanId) {
+        if (!is_numeric($vlanId)) {
+            throw new Exception("VLAN ID должен быть числом");
+        }
+        
+        $vlanId = intval($vlanId);
+        if ($vlanId < 1 || $vlanId > 4094) {
+            throw new Exception("VLAN ID должен быть в диапазоне от 1 до 4094");
+        }
+        
+        return $vlanId;
+    }
+
+    private function validatePorts($portsStr) {
+        $parts = explode(',', $portsStr);
+        $allPorts = [];
+        
+        foreach ($parts as $part) {
+            if (strpos($part, '-') !== false) {
+                list($start, $end) = explode('-', $part);
+                if (!is_numeric($start) || !is_numeric($end)) {
+                    throw new Exception("Некорректный формат портов: $part");
+                }
+                if ($start > $end) {
+                    throw new Exception("Начальный порт больше конечного: $part");
+                }
+                if ($start < 1 || $end > $this->portCount) {
+                    throw new Exception("Порты должны быть в диапазоне от 1 до {$this->portCount}");
+                }
+                $allPorts = array_merge($allPorts, range($start, $end));
+            } else {
+                if (!is_numeric($part)) {
+                    throw new Exception("Некорректный номер порта: $part");
+                }
+                $port = intval($part);
+                if ($port < 1 || $port > $this->portCount) {
+                    throw new Exception("Порт $port выходит за пределы диапазона (1-{$this->portCount})");
+                }
+                $allPorts[] = $port;
+            }
+        }
+        
+        return array_unique($allPorts);
+    }
+
+    private function handleSnmpError($operation, $details = '') {
+        $error = error_get_last();
+        $errorMessage = $error ? $error['message'] : 'Неизвестная ошибка';
+        $this->logger->error("Ошибка SNMP при $operation: $errorMessage $details");
+        throw new Exception("Ошибка SNMP при $operation: $errorMessage");
+    }
+
+    // Обновляем метод createVlan с новыми проверками
+    public function createVlan($vlanId) {
+        try {
+            $vlanId = $this->validateVlanId($vlanId);
+            $this->logVlanState("создание VLAN $vlanId");
+            $this->logger->info("Попытка создания VLAN $vlanId");
+            
+            // Добавляем отладочный вывод
+            $this->logger->debug("Используемая read-write community строка: " . $this->readWriteCommunity);
+            
+            // Проверяем, не существует ли уже VLAN
+            if ($this->checkVlanExists($vlanId)) {
+                $this->logger->warning("VLAN $vlanId уже существует");
+                throw new Exception("VLAN $vlanId уже существует");
+            }
+
+            // 1. Создаем VLAN через dot1qVlanStaticRowStatus
+            $this->logger->debug("Создание VLAN $vlanId через dot1qVlanStaticRowStatus");
+            $result = snmp2_set($this->ip, $this->readWriteCommunity,
+                              ".1.3.6.1.2.1.17.7.1.4.3.1.5.$vlanId",
+                              'i', 4); // createAndGo(4)
+            
+            if ($result === false) {
+                $this->handleSnmpError("создании VLAN", "VLAN ID: $vlanId");
+            }
+
+            // Добавляем задержку для обработки операции коммутатором
+            sleep(2);
+
+            // 2. Устанавливаем имя VLAN
+            $this->logger->debug("Установка имени для VLAN $vlanId");
+            $result = snmp2_set($this->ip, $this->readWriteCommunity,
+                              ".1.3.6.1.2.1.17.7.1.4.3.1.1.$vlanId",
+                              's', "$vlanId");
+            
+            if ($result === false) {
+                $this->handleSnmpError("установке имени VLAN", "VLAN ID: $vlanId");
+            }
+
+            // Проверяем, что VLAN действительно создан
+            if (!$this->checkVlanExists($vlanId)) {
+                $this->logger->error("VLAN $vlanId не был создан");
+                throw new Exception("VLAN не был создан");
+            }
+
+            $this->logger->info("VLAN $vlanId успешно создан");
+            return true;
+        } catch (Exception $e) {
+            $this->logger->error("Ошибка создания VLAN $vlanId: " . $e->getMessage());
+            throw new Exception("Ошибка создания VLAN: " . $e->getMessage());
+        }
+    }
+
+    // Удаление VLAN
+    public function deleteVlan($vlanId) {
+        try {
+            $this->logVlanState("удаление VLAN $vlanId");
+            $this->logger->info("Попытка удаления VLAN $vlanId");
+            
+            // Проверяем существование VLAN
+            if (!$this->checkVlanExists($vlanId)) {
+                $this->logger->warning("VLAN $vlanId не существует");
+                throw new Exception("VLAN $vlanId не существует");
+            }
+
+            // Получаем информацию о VLAN
+            $vlanDetails = $this->getVlanDetails();
+            $vlanInfo = null;
+            foreach ($vlanDetails as $vlan) {
+                if ($vlan['id'] == $vlanId) {
+                    $vlanInfo = $vlan;
+                    break;
+                }
+            }
+
+            if (!$vlanInfo) {
+                $this->logger->error("Не удалось получить информацию о VLAN $vlanId");
+                throw new Exception("Не удалось получить информацию о VLAN $vlanId");
+            }
+
+            // Проверяем, нет ли портов в VLAN
+            if (!empty($vlanInfo['ports']['tagged']) || !empty($vlanInfo['ports']['untagged'])) {
+                $this->logger->warning("VLAN $vlanId содержит порты. Сначала удалите все порты из VLAN");
+                throw new Exception("VLAN $vlanId содержит порты. Сначала удалите все порты из VLAN.");
+            }
+
+            // Удаляем VLAN через dot1qVlanStaticRowStatus
+            $this->logger->debug("Удаление VLAN $vlanId через dot1qVlanStaticRowStatus");
+            $result = snmp2_set($this->ip, $this->readWriteCommunity,
+                              ".1.3.6.1.2.1.17.7.1.4.3.1.5.$vlanId",
+                              'i', 6); // destroy(6)
+            
+            if ($result === false) {
+                $this->logger->error("Ошибка удаления VLAN $vlanId");
+                throw new Exception("Ошибка удаления VLAN");
+            }
+
+            $this->logger->info("VLAN $vlanId успешно удален");
+            return true;
+        } catch (Exception $e) {
+            $this->logger->error("Ошибка удаления VLAN $vlanId: " . $e->getMessage());
+            throw new Exception("Ошибка удаления VLAN: " . $e->getMessage());
+        }
     }
 
     // Получение информации о VLAN для порта
@@ -192,63 +442,63 @@ class DlinkSNMP {
         return $vlans;
     }
 
-    // Добавление портов в VLAN
+    // Обновляем метод addPortsToVlan с новыми проверками
     public function addPortsToVlan($portsStr, $vlanId, $tagged = false) {
-        if (!$this->checkVlanExists($vlanId)) {
-            throw new Exception("VLAN $vlanId не существует");
-        }
+        try {
+            $vlanId = $this->validateVlanId($vlanId);
+            $validatedPorts = $this->validatePorts($portsStr);
+            
+            if (!$this->checkVlanExists($vlanId)) {
+                throw new Exception("VLAN $vlanId не существует");
+            }
 
-        // Получаем текущие маски
-        $currentTaggedMask = $this->getVlanMask($vlanId, 'tagged');
-        $currentUntaggedMask = $this->getVlanMask($vlanId, 'untagged');
-        
-        // Создаем маску для новых портов
-        $newPortsMask = $this->createPortMask($portsStr);
-        
-        if ($tagged) {
-            // Для tagged портов объединяем текущую маску с новой
-            $taggedValues = array_map(function($current, $new) {
-                return sprintf("%02X", hexdec($current) | hexdec($new));
-            }, $currentTaggedMask, $newPortsMask);
+            $this->logVlanState("добавление портов " . implode(',', $validatedPorts) . " в VLAN $vlanId как " . ($tagged ? "tagged" : "untagged"));
             
-            $taggedValue = implode(" ", $taggedValues);
-            $result = snmp2_set($this->ip, $this->readWriteCommunity, 
-                              ".1.3.6.1.2.1.17.7.1.4.3.1.2.$vlanId", 
-                              'x', $taggedValue);
+            // Получаем текущие маски
+            $currentTaggedMask = $this->getVlanMask($vlanId, 'tagged');
+            $currentUntaggedMask = $this->getVlanMask($vlanId, 'untagged');
             
-            if ($result === false) {
-                throw new Exception("Ошибка добавления портов в tagged VLAN");
-            }
-        } else {
-            // Для untagged портов
-            $taggedValues = array_map(function($current, $new) {
-                return sprintf("%02X", hexdec($current) | hexdec($new));
-            }, $currentTaggedMask, $newPortsMask);
-            
-            $untaggedValues = array_map(function($current, $new) {
-                return sprintf("%02X", hexdec($current) | hexdec($new));
-            }, $currentUntaggedMask, $newPortsMask);
-            
-            // Устанавливаем tagged конфигурацию
-            $result = snmp2_set($this->ip, $this->readWriteCommunity,
-                              ".1.3.6.1.2.1.17.7.1.4.3.1.2.$vlanId",
-                              'x', implode(" ", $taggedValues));
-            
-            if ($result === false) {
-                throw new Exception("Ошибка добавления портов в VLAN");
+            if (!$currentTaggedMask || !$currentUntaggedMask) {
+                throw new Exception("Не удалось получить текущие маски портов");
             }
             
-            // Устанавливаем untagged конфигурацию
-            $result = snmp2_set($this->ip, $this->readWriteCommunity,
-                              ".1.3.6.1.2.1.17.7.1.4.3.1.4.$vlanId",
-                              'x', implode(" ", $untaggedValues));
+            // Создаем маску для новых портов
+            $newPortsMask = $this->createPortMask(implode(',', $validatedPorts));
             
-            if ($result === false) {
-                throw new Exception("Ошибка установки портов как untagged");
+            if ($tagged) {
+                // Для tagged портов объединяем текущую маску с новой
+                $taggedValues = array_map(function($current, $new) {
+                    return sprintf("%02X", hexdec($current) | hexdec($new));
+                }, $currentTaggedMask, $newPortsMask);
+                
+                $taggedValue = implode(" ", $taggedValues);
+                $result = snmp2_set($this->ip, $this->readWriteCommunity, 
+                                  ".1.3.6.1.2.1.17.7.1.4.3.1.2.$vlanId", 
+                                  'x', $taggedValue);
+                
+                if ($result === false) {
+                    $this->handleSnmpError("добавлении tagged портов", "VLAN ID: $vlanId, Порты: $portsStr");
+                }
+            } else {
+                // Для untagged портов
+                $untaggedValues = array_map(function($current, $new) {
+                    return sprintf("%02X", hexdec($current) | hexdec($new));
+                }, $currentUntaggedMask, $newPortsMask);
+                
+                $result = snmp2_set($this->ip, $this->readWriteCommunity,
+                                  ".1.3.6.1.2.1.17.7.1.4.3.1.4.$vlanId",
+                                  'x', implode(" ", $untaggedValues));
+                
+                if ($result === false) {
+                    $this->handleSnmpError("добавлении untagged портов", "VLAN ID: $vlanId, Порты: $portsStr");
+                }
             }
+            
+            return true;
+        } catch (Exception $e) {
+            $this->logger->error("Ошибка добавления портов в VLAN: " . $e->getMessage());
+            throw new Exception("Ошибка добавления портов в VLAN: " . $e->getMessage());
         }
-        
-        return true;
     }
 
     // Удаление портов из VLAN
@@ -483,6 +733,97 @@ class DlinkSNMP {
                 ]
             ],
             'endpoints' => [
+                'vlans' => [
+                    'description' => 'Получение списка VLAN с подробной информацией',
+                    'usage' => [
+                        'cli' => 'php snmp_api.php <ip> vlans',
+                        'http' => [
+                            'method' => 'POST',
+                            'endpoint' => '/',
+                            'body' => [
+                                'ip' => 'string (IP-адрес коммутатора)',
+                                'action' => 'vlans'
+                            ]
+                        ],
+                        'get' => [
+                            'url' => '/snmp_api.php/vlans?ip=<ip>',
+                            'example' => '/snmp_api.php/vlans?ip=10.2.0.65'
+                        ]
+                    ],
+                    'returns' => [
+                        'vlan_id' => 'Идентификатор VLAN',
+                        'name' => 'Имя VLAN',
+                        'ports' => [
+                            'tagged' => 'Список портов с тегированным трафиком',
+                            'untagged' => 'Список портов с нетегированным трафиком'
+                        ]
+                    ],
+                    'examples' => [
+                        'cli' => 'php snmp_api.php 10.2.0.65 vlans',
+                        'curl' => 'curl -X POST -H "Content-Type: application/json" -d \'{"ip":"10.2.0.65","action":"vlans"}\' http://localhost:8000/snmp_api.php',
+                        'browser' => 'http://localhost:8000/snmp_api.php/vlans?ip=10.2.0.65'
+                    ]
+                ],
+                'create' => [
+                    'description' => 'Создание нового VLAN',
+                    'usage' => [
+                        'cli' => 'php snmp_api.php <ip> create <vlan_id>',
+                        'http' => [
+                            'method' => 'POST',
+                            'endpoint' => '/',
+                            'body' => [
+                                'ip' => 'string (IP-адрес коммутатора)',
+                                'action' => 'create',
+                                'vlan' => 'integer (номер VLAN)'
+                            ]
+                        ],
+                        'get' => [
+                            'url' => '/snmp_api.php/create?ip=<ip>&vlan=<vlan>',
+                            'example' => '/snmp_api.php/create?ip=10.2.0.65&vlan=100'
+                        ]
+                    ],
+                    'returns' => [
+                        'success' => 'true/false',
+                        'message' => 'Сообщение об успехе или ошибке'
+                    ],
+                    'examples' => [
+                        'cli' => 'php snmp_api.php 10.2.0.65 create 100',
+                        'curl' => 'curl -X POST -H "Content-Type: application/json" -d \'{"ip":"10.2.0.65","action":"create","vlan":100}\' http://localhost:8000/snmp_api.php',
+                        'browser' => 'http://localhost:8000/snmp_api.php/create?ip=10.2.0.65&vlan=100'
+                    ]
+                ],
+                'delete' => [
+                    'description' => 'Удаление VLAN',
+                    'usage' => [
+                        'cli' => 'php snmp_api.php <ip> delete <vlan_id>',
+                        'http' => [
+                            'method' => 'POST',
+                            'endpoint' => '/',
+                            'body' => [
+                                'ip' => 'string (IP-адрес коммутатора)',
+                                'action' => 'delete',
+                                'vlan' => 'integer (номер VLAN)'
+                            ]
+                        ],
+                        'get' => [
+                            'url' => '/snmp_api.php/delete?ip=<ip>&vlan=<vlan>',
+                            'example' => '/snmp_api.php/delete?ip=10.2.0.65&vlan=100'
+                        ]
+                    ],
+                    'returns' => [
+                        'success' => 'true/false',
+                        'message' => 'Сообщение об успехе или ошибке'
+                    ],
+                    'notes' => [
+                        'Перед удалением VLAN необходимо удалить все порты из него',
+                        'Если в VLAN есть порты, операция удаления будет отклонена'
+                    ],
+                    'examples' => [
+                        'cli' => 'php snmp_api.php 10.2.0.65 delete 100',
+                        'curl' => 'curl -X POST -H "Content-Type: application/json" -d \'{"ip":"10.2.0.65","action":"delete","vlan":100}\' http://localhost:8000/snmp_api.php',
+                        'browser' => 'http://localhost:8000/snmp_api.php/delete?ip=10.2.0.65&vlan=100'
+                    ]
+                ],
                 'info' => [
                     'description' => 'Получение информации о коммутаторе',
                     'usage' => [
@@ -675,15 +1016,19 @@ class DlinkSNMP {
                     throw new Exception("Ошибка проверки read-only community");
                 }
             } else {
-                // Для read-write пробуем получить и установить sysContact
-                // Сначала сохраняем текущее значение
-                $currentContact = snmp2_get($this->ip, $community, '.1.3.6.1.2.1.1.4.0');
-                if ($currentContact === false) {
+                // Для read-write пробуем получить и установить sysName
+                $currentName = snmp2_get($this->ip, $community, '.1.3.6.1.2.1.1.5.0');
+                if ($currentName === false) {
                     throw new Exception("Ошибка проверки read-write community (чтение)");
                 }
                 
+                // Извлекаем текущее имя из строки вида 'STRING: "name"'
+                if (preg_match('/STRING: "(.*)"/', $currentName, $matches)) {
+                    $currentName = $matches[1];
+                }
+                
                 // Пробуем установить то же самое значение обратно
-                $result = snmp2_set($this->ip, $community, '.1.3.6.1.2.1.1.4.0', 's', $currentContact);
+                $result = snmp2_set($this->ip, $community, '.1.3.6.1.2.1.1.5.0', 's', $currentName);
                 if ($result === false) {
                     throw new Exception("Ошибка проверки read-write community (запись)");
                 }
@@ -698,7 +1043,11 @@ class DlinkSNMP {
 
 // Обновляем CLI интерфейс
 if (php_sapi_name() === 'cli') {
+    $logger = Logger::getInstance();
+    $logger->info("Запуск CLI интерфейса");
+    
     if ($argc < 2) {
+        $logger->warning("Недостаточно аргументов командной строки");
         die("Использование: php snmp_api.php <ip> <action> [ports] [vlan] [tagged]\n" .
             "Для получения полной документации используйте: php snmp_api.php help\n\n" .
             "Примечание: При каждом обращении к коммутатору выполняется автоматическая проверка\n" .
@@ -707,6 +1056,7 @@ if (php_sapi_name() === 'cli') {
 
     try {
         if ($argv[1] === 'help') {
+            $logger->info("Запрошена справка");
             $snmp = new DlinkSNMP('localhost');
             echo $snmp->getApiDocs();
             exit(0);
@@ -714,9 +1064,22 @@ if (php_sapi_name() === 'cli') {
 
         $ip = $argv[1];
         $action = $argv[2];
-        $ports = isset($argv[3]) ? $argv[3] : null;
-        $vlan = isset($argv[4]) ? $argv[4] : null;
+        
+        $logger->info("Выполнение команды: $action для IP: $ip");
+        
+        // Специальная обработка для команд create и delete
+        if (($action === 'create' || $action === 'delete') && isset($argv[3])) {
+            $vlan = intval($argv[3]);
+            $ports = null;
+        } else {
+            $ports = isset($argv[3]) ? $argv[3] : null;
+            $vlan = isset($argv[4]) ? intval($argv[4]) : null;
+        }
+        
         $tagged = isset($argv[5]) ? (bool)$argv[5] : false;
+
+        $logger->debug("Параметры команды: IP=$ip, Action=$action, Ports=" . ($ports ?? 'null') . 
+                      ", VLAN=" . ($vlan ?? 'null') . ", Tagged=" . ($tagged ? 'true' : 'false'));
 
         $snmp = new DlinkSNMP($ip);
         
@@ -749,7 +1112,8 @@ if (php_sapi_name() === 'cli') {
 
             case 'add':
                 if ($vlan === null) {
-                    die("Для добавления портов необходимо указать VLAN\n");
+                    die("Для добавления портов необходимо указать VLAN\n" .
+                        "Использование: php snmp_api.php <ip> add <ports> <vlan> [tagged]\n");
                 }
                 $result = $snmp->addPortsToVlan($ports, $vlan, $tagged);
                 echo "Порты $ports успешно добавлены в VLAN $vlan как " . ($tagged ? "tagged" : "untagged") . "\n";
@@ -757,10 +1121,41 @@ if (php_sapi_name() === 'cli') {
 
             case 'remove':
                 if ($vlan === null) {
-                    die("Для удаления портов необходимо указать VLAN\n");
+                    die("Для удаления портов необходимо указать VLAN\n" .
+                        "Использование: php snmp_api.php <ip> remove <ports> <vlan>\n");
                 }
                 $result = $snmp->removePortsFromVlan($ports, $vlan);
                 echo "Порты $ports успешно удалены из VLAN $vlan\n";
+                break;
+
+            case 'create':
+                if ($vlan === null) {
+                    die("Для создания VLAN необходимо указать ID\n" .
+                        "Использование: php snmp_api.php <ip> create <vlan_id>\n");
+                }
+                $result = $snmp->createVlan($vlan);
+                echo "VLAN $vlan успешно создан\n";
+                break;
+
+            case 'delete':
+                echo "DEBUG: Вход в case 'delete'\n";
+                echo "DEBUG: vlan = " . ($vlan ?? 'null') . "\n";
+                if ($vlan === null) {
+                    die("Для удаления VLAN необходимо указать ID\n" .
+                        "Использование: php snmp_api.php <ip> delete <vlan_id>\n");
+                }
+                $result = $snmp->deleteVlan($vlan);
+                echo "VLAN $vlan успешно удален\n";
+                break;
+
+            case 'vlans':
+                $vlans = $snmp->getVlanDetails();
+                echo "=== Список VLAN'ов ===\n";
+                foreach ($vlans as $vlan) {
+                    echo "\nVLAN {$vlan['id']} ({$vlan['name']})\n";
+                    echo "Tagged порты: " . (empty($vlan['ports']['tagged']) ? "нет" : implode(", ", $vlan['ports']['tagged'])) . "\n";
+                    echo "Untagged порты: " . (empty($vlan['ports']['untagged']) ? "нет" : implode(", ", $vlan['ports']['untagged'])) . "\n";
+                }
                 break;
 
             case 'interfaces':
@@ -936,6 +1331,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 break;
                 
+            case 'create':
+                if (!isset($input['vlan'])) {
+                    throw new Exception("Необходимо указать ID VLAN");
+                }
+                $result = $snmp->createVlan($input['vlan']);
+                break;
+                
+            case 'delete':
+                echo "DEBUG: Вход в case 'delete'\n";
+                echo "DEBUG: vlan = " . ($input['vlan'] ?? 'null') . "\n";
+                if ($input['vlan'] === null) {
+                    throw new Exception("Необходимо указать ID VLAN");
+                }
+                $result = $snmp->deleteVlan($input['vlan']);
+                echo "VLAN " . $input['vlan'] . " успешно удален\n";
+                break;
+
+            case 'vlans':
+                $result = $snmp->getVlanDetails();
+                break;
+
             default:
                 throw new Exception("Неизвестное действие");
         }
@@ -1035,6 +1451,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             border-radius: 4px;
             color: #333;
         }
+        .returns {
+            margin: 10px 0;
+            padding: 10px;
+            background: #e9ecef;
+            border-radius: 4px;
+        }
+        .returns h4 {
+            margin: 0 0 10px 0;
+            color: #666;
+        }
+        .returns pre {
+            margin: 0;
+            white-space: pre-wrap;
+            font-family: monospace;
+            font-size: 14px;
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 4px;
+            color: #333;
+        }
     </style>
 </head>
 <body>
@@ -1044,6 +1480,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <h3>Получение информации о коммутаторе</h3>
             <div class="method">GET /snmp_api.php/info</div>
             <div class="description">Получение информации о коммутаторе (модель, имя, количество портов)</div>
+            <div class="returns">
+                <h4>Возвращаемые данные:</h4>
+                <pre>{
+    "success": true,
+    "data": {
+        "name": "имя коммутатора",
+        "model": "модель коммутатора",
+        "port_count": "количество портов",
+        "max_bytes": "размер маски в байтах"
+    }
+}</pre>
+            </div>
             <div class="examples">
                 <h4>Примеры использования:</h4>
                 <div class="tab-container">
@@ -1075,6 +1523,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <h3>Получение информации о VLAN на портах</h3>
             <div class="method">GET /snmp_api.php/get</div>
             <div class="description">Получение информации о VLAN на указанных портах</div>
+            <div class="returns">
+                <h4>Возвращаемые данные:</h4>
+                <pre>{
+    "success": true,
+    "data": [
+        {
+            "port": "номер порта",
+            "vlans": [
+                {
+                    "vlan": "номер VLAN",
+                    "type": "tagged/untagged"
+                }
+            ]
+        }
+    ]
+}</pre>
+            </div>
             <div class="examples">
                 <h4>Примеры использования:</h4>
                 <div class="tab-container">
@@ -1107,6 +1572,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <h3>Добавление портов в VLAN</h3>
             <div class="method">GET /snmp_api.php/add</div>
             <div class="description">Добавление указанных портов в VLAN (tagged или untagged)</div>
+            <div class="returns">
+                <h4>Возвращаемые данные:</h4>
+                <pre>{
+    "success": true,
+    "data": true
+}</pre>
+            </div>
             <div class="examples">
                 <h4>Примеры использования:</h4>
                 <div class="tab-container">
@@ -1144,6 +1616,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <h3>Удаление портов из VLAN</h3>
             <div class="method">GET /snmp_api.php/remove</div>
             <div class="description">Удаление указанных портов из VLAN</div>
+            <div class="returns">
+                <h4>Возвращаемые данные:</h4>
+                <pre>{
+    "success": true,
+    "data": true
+}</pre>
+            </div>
             <div class="examples">
                 <h4>Примеры использования:</h4>
                 <div class="tab-container">
@@ -1177,6 +1656,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <h3>Получение информации об интерфейсах</h3>
             <div class="method">GET /snmp_api.php/interfaces</div>
             <div class="description">Получение информации о всех интерфейсах коммутатора</div>
+            <div class="returns">
+                <h4>Возвращаемые данные:</h4>
+                <pre>{
+    "success": true,
+    "data": [
+        {
+            "index": "номер интерфейса",
+            "description": "описание интерфейса",
+            "type": "тип интерфейса (physical/combo/vlan/system)",
+            "status": "статус интерфейса",
+            "speed": "скорость интерфейса",
+            "mac": "MAC-адрес интерфейса"
+        }
+    ]
+}</pre>
+            </div>
             <div class="examples">
                 <h4>Примеры использования:</h4>
                 <div class="tab-container">
@@ -1208,6 +1703,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <h3>Получение документации</h3>
             <div class="method">GET /snmp_api.php/help</div>
             <div class="description">Получение полной документации по API</div>
+            <div class="returns">
+                <h4>Возвращаемые данные:</h4>
+                <pre>{
+    "success": true,
+    "data": {
+        "description": "описание API",
+        "version": "версия API",
+        "security": {
+            "description": "информация о безопасности",
+            "checks": {
+                "read_only": {
+                    "description": "проверка read-only community",
+                    "oid": "OID для проверки"
+                },
+                "read_write": {
+                    "description": "проверка read-write community",
+                    "oid": "OID для проверки"
+                }
+            }
+        },
+        "endpoints": {
+            "описание всех доступных эндпоинтов"
+        }
+    },
+    "note": "дополнительная информация"
+}</pre>
+            </div>
             <div class="examples">
                 <h4>Примеры использования:</h4>
                 <div class="tab-container">
@@ -1233,6 +1755,152 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <button onclick="tryEndpoint('help')">Получить документацию</button>
             </div>
         </div>
+        
+        <div class="endpoint">
+            <h3>Получение списка VLAN</h3>
+            <div class="method">GET /snmp_api.php/vlans</div>
+            <div class="description">Получение подробной информации о всех VLAN'ах на коммутаторе</div>
+            <div class="returns">
+                <h4>Возвращаемые данные:</h4>
+                <pre>{
+    "success": true,
+    "data": [
+        {
+            "id": "номер VLAN",
+            "name": "имя VLAN",
+            "ports": {
+                "tagged": ["список портов с тегированным трафиком"],
+                "untagged": ["список портов с нетегированным трафиком"]
+            }
+        }
+    ]
+}</pre>
+            </div>
+            <div class="examples">
+                <h4>Примеры использования:</h4>
+                <div class="tab-container">
+                    <div class="tab-buttons">
+                        <button class="tab-button active" onclick="showTab(this, 'cli-vlans')">CLI</button>
+                        <button class="tab-button" onclick="showTab(this, 'curl-vlans')">CURL</button>
+                        <button class="tab-button" onclick="showTab(this, 'url-vlans')">URL</button>
+                    </div>
+                    <div id="cli-vlans" class="tab-content active">
+                        <pre>php snmp_api.php 10.2.0.65 vlans</pre>
+                    </div>
+                    <div id="curl-vlans" class="tab-content">
+                        <pre>curl -X POST -H "Content-Type: application/json" \\
+     -d '{"ip":"10.2.0.65","action":"vlans"}' \\
+     http://localhost:8000/snmp_api.php</pre>
+                    </div>
+                    <div id="url-vlans" class="tab-content">
+                        <pre>http://localhost:8000/snmp_api.php/vlans?ip=10.2.0.65</pre>
+                    </div>
+                </div>
+            </div>
+            <div class="try-it">
+                <input type="text" id="ip-vlans" placeholder="IP-адрес коммутатора">
+                <button onclick="tryEndpoint('vlans')">Выполнить</button>
+            </div>
+        </div>
+
+        <div class="endpoint">
+            <h3>Создание VLAN</h3>
+            <div class="method">GET /snmp_api.php/create</div>
+            <div class="description">Создание нового VLAN на коммутаторе</div>
+            <div class="returns">
+                <h4>Возвращаемые данные:</h4>
+                <pre>{
+    "success": true,
+    "data": true
+}</pre>
+            </div>
+            <div class="examples">
+                <h4>Примеры использования:</h4>
+                <div class="tab-container">
+                    <div class="tab-buttons">
+                        <button class="tab-button active" onclick="showTab(this, 'cli-create')">CLI</button>
+                        <button class="tab-button" onclick="showTab(this, 'curl-create')">CURL</button>
+                        <button class="tab-button" onclick="showTab(this, 'url-create')">URL</button>
+                    </div>
+                    <div id="cli-create" class="tab-content active">
+                        <pre>php snmp_api.php 10.2.0.65 create 100</pre>
+                    </div>
+                    <div id="curl-create" class="tab-content">
+                        <pre>curl -X POST -H "Content-Type: application/json" \\
+     -d '{"ip":"10.2.0.65","action":"create","vlan":100}' \\
+     http://localhost:8000/snmp_api.php</pre>
+                    </div>
+                    <div id="url-create" class="tab-content">
+                        <pre>http://localhost:8000/snmp_api.php/create?ip=10.2.0.65&vlan=100</pre>
+                    </div>
+                </div>
+            </div>
+            <div class="try-it">
+                <input type="text" id="ip-create" placeholder="IP-адрес коммутатора">
+                <input type="number" id="vlan-create" placeholder="VLAN ID">
+                <button onclick="tryEndpoint('create')">Выполнить</button>
+            </div>
+        </div>
+
+        <div class="endpoint">
+            <h3>Удаление VLAN</h3>
+            <div class="method">GET /snmp_api.php/delete</div>
+            <div class="description">Удаление VLAN с коммутатора</div>
+            <div class="returns">
+                <h4>Возвращаемые данные:</h4>
+                <pre>{
+    "success": true,
+    "data": true
+}</pre>
+            </div>
+            <div class="notes">
+                <p><strong>Важно:</strong> Перед удалением VLAN необходимо удалить все порты из него.</p>
+                <p>Если в VLAN есть порты, операция удаления будет отклонена.</p>
+            </div>
+            <div class="examples">
+                <h4>Примеры использования:</h4>
+                <div class="tab-container">
+                    <div class="tab-buttons">
+                        <button class="tab-button active" onclick="showTab(this, 'cli-delete')">CLI</button>
+                        <button class="tab-button" onclick="showTab(this, 'curl-delete')">CURL</button>
+                        <button class="tab-button" onclick="showTab(this, 'url-delete')">URL</button>
+                    </div>
+                    <div id="cli-delete" class="tab-content active">
+                        <pre>php snmp_api.php 10.2.0.65 delete 100</pre>
+                    </div>
+                    <div id="curl-delete" class="tab-content">
+                        <pre>curl -X POST -H "Content-Type: application/json" \\
+     -d '{"ip":"10.2.0.65","action":"delete","vlan":100}' \\
+     http://localhost:8000/snmp_api.php</pre>
+                    </div>
+                    <div id="url-delete" class="tab-content">
+                        <pre>http://localhost:8000/snmp_api.php/delete?ip=10.2.0.65&vlan=100</pre>
+                    </div>
+                </div>
+            </div>
+            <div class="try-it">
+                <input type="text" id="ip-delete" placeholder="IP-адрес коммутатора">
+                <input type="number" id="vlan-delete" placeholder="VLAN ID">
+                <button onclick="tryEndpoint('delete')">Выполнить</button>
+            </div>
+        </div>
+
+        <style>
+            .notes {
+                margin: 10px 0;
+                padding: 10px;
+                background: #fff3cd;
+                border: 1px solid #ffeeba;
+                border-radius: 4px;
+            }
+            .notes p {
+                margin: 5px 0;
+                color: #856404;
+            }
+            .notes strong {
+                color: #533f03;
+            }
+        </style>
         
         <div id="result"></div>
     </div>
@@ -1394,6 +2062,27 @@ HTML;
                 }
                 break;
                 
+            case 'create':
+                if (!isset($_GET['vlan'])) {
+                    throw new Exception("Необходимо указать ID VLAN");
+                }
+                $result = $snmp->createVlan($_GET['vlan']);
+                break;
+                
+            case 'delete':
+                echo "DEBUG: Вход в case 'delete'\n";
+                echo "DEBUG: vlan = " . ($_GET['vlan'] ?? 'null') . "\n";
+                if ($_GET['vlan'] === null) {
+                    throw new Exception("Необходимо указать ID VLAN");
+                }
+                $result = $snmp->deleteVlan($_GET['vlan']);
+                echo "VLAN " . $_GET['vlan'] . " успешно удален\n";
+                break;
+
+            case 'vlans':
+                $result = $snmp->getVlanDetails();
+                break;
+
             default:
                 throw new Exception("Неизвестное действие");
         }
