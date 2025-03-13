@@ -1428,7 +1428,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     throw new Exception("Необходимо указать ID VLAN");
                 }
                 $result = $snmp->deleteVlan($input['vlan']);
-                echo "VLAN " . $input['vlan'] . " успешно удален\n";
+                echo json_encode([
+                    'success' => true,
+                    'message' => "VLAN " . $input['vlan'] . " успешно удален",
+                    'data' => $result
+                ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+                exit;
                 break;
 
             case 'vlans':
@@ -2193,13 +2198,16 @@ HTML;
                     break;
                     
                 case 'delete':
-                    echo "DEBUG: Вход в case 'delete'\n";
-                    echo "DEBUG: vlan = " . ($_GET['vlan'] ?? 'null') . "\n";
                     if ($_GET['vlan'] === null) {
                         throw new Exception("Необходимо указать ID VLAN");
                     }
                     $result = $snmp->deleteVlan($_GET['vlan']);
-                    echo "VLAN " . $_GET['vlan'] . " успешно удален\n";
+                    echo json_encode([
+                        'success' => true,
+                        'message' => "VLAN " . $_GET['vlan'] . " успешно удален",
+                        'data' => $result
+                    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+                    exit;
                     break;
 
                 case 'vlans':
