@@ -849,8 +849,8 @@ class DlinkSNMP {
                     ],
                     'examples' => [
                         'cli' => 'php snmp_api.php 10.2.0.65 info',
-                        'curl' => 'curl -X POST -H "Content-Type: application/json" -d \'{"ip":"10.2.0.65","action":"info"}\' http://localhost:8000/snmp_api.php',
-                        'browser' => 'http://localhost:8000/snmp_api.php/info?ip=10.2.0.65'
+                        'curl' => 'curl -X POST -H "Content-Type: application/json" -d \'{"ip":"10.2.0.65","action":"info"}\' /snmp_api.php',
+                        'browser' => '/snmp_api.php/info?ip=10.2.0.65'
                     ]
                 ],
                 'get' => [
@@ -874,8 +874,8 @@ class DlinkSNMP {
                     'returns' => 'Список VLAN для каждого порта с указанием типа (tagged/untagged)',
                     'examples' => [
                         'cli' => 'php snmp_api.php 10.2.0.65 get 1-4',
-                        'curl' => 'curl -X POST -H "Content-Type: application/json" -d \'{"ip":"10.2.0.65","action":"get","ports":"1-4"}\' http://localhost:8000/snmp_api.php',
-                        'browser' => 'http://localhost:8000/snmp_api.php/get?ip=10.2.0.65&ports=1-4'
+                        'curl' => 'curl -X POST -H "Content-Type: application/json" -d \'{"ip":"10.2.0.65","action":"get","ports":"1-4"}\' /snmp_api.php',
+                        'browser' => '/snmp_api.php/get?ip=10.2.0.65&ports=1-4'
                     ]
                 ],
                 'add' => [
@@ -901,8 +901,8 @@ class DlinkSNMP {
                     'notes' => 'Параметр tagged определяет тип добавления порта в VLAN (true - tagged, false - untagged)',
                     'examples' => [
                         'cli' => 'php snmp_api.php 10.2.0.65 add 1-4 100',
-                        'curl' => 'curl -X POST -H "Content-Type: application/json" -d \'{"ip":"10.2.0.65","action":"add","ports":"1-4","vlan":100,"tagged":false}\' http://localhost:8000/snmp_api.php',
-                        'browser' => 'http://localhost:8000/snmp_api.php/add?ip=10.2.0.65&ports=1-4&vlan=100&tagged=0'
+                        'curl' => 'curl -X POST -H "Content-Type: application/json" -d \'{"ip":"10.2.0.65","action":"add","ports":"1-4","vlan":100,"tagged":false}\' /snmp_api.php',
+                        'browser' => '/snmp_api.php/add?ip=10.2.0.65&ports=1-4&vlan=100&tagged=0'
                     ]
                 ],
                 'remove' => [
@@ -926,8 +926,8 @@ class DlinkSNMP {
                     ],
                     'examples' => [
                         'cli' => 'php snmp_api.php 10.2.0.65 remove 1-4 100',
-                        'curl' => 'curl -X POST -H "Content-Type: application/json" -d \'{"ip":"10.2.0.65","action":"remove","ports":"1-4","vlan":100}\' http://localhost:8000/snmp_api.php',
-                        'browser' => 'http://localhost:8000/snmp_api.php/remove?ip=10.2.0.65&ports=1-4&vlan=100'
+                        'curl' => 'curl -X POST -H "Content-Type: application/json" -d \'{"ip":"10.2.0.65","action":"remove","ports":"1-4","vlan":100}\' /snmp_api.php',
+                        'browser' => '/snmp_api.php/remove?ip=10.2.0.65&ports=1-4&vlan=100'
                     ]
                 ],
                 'interfaces' => [
@@ -954,8 +954,8 @@ class DlinkSNMP {
                     ],
                     'examples' => [
                         'cli' => 'php snmp_api.php 10.2.0.65 interfaces',
-                        'curl' => 'curl -X POST -H "Content-Type: application/json" -d \'{"ip":"10.2.0.65","action":"interfaces"}\' http://localhost:8000/snmp_api.php',
-                        'browser' => 'http://localhost:8000/snmp_api.php/interfaces?ip=10.2.0.65'
+                        'curl' => 'curl -X POST -H "Content-Type: application/json" -d \'{"ip":"10.2.0.65","action":"interfaces"}\' /snmp_api.php',
+                        'browser' => '/snmp_api.php/interfaces?ip=10.2.0.65'
                     ]
                 ],
                 'help' => [
@@ -977,8 +977,8 @@ class DlinkSNMP {
                     'returns' => 'Полная документация по API',
                     'examples' => [
                         'cli' => 'php snmp_api.php help',
-                        'curl' => 'curl -X POST -H "Content-Type: application/json" -d \'{"action":"help"}\' http://localhost:8000/snmp_api.php',
-                        'browser' => 'http://localhost:8000/snmp_api.php/help'
+                        'curl' => 'curl -X POST -H "Content-Type: application/json" -d \'{"action":"help"}\' /snmp_api.php',
+                        'browser' => '/snmp_api.php/help'
                     ]
                 ]
             ]
@@ -1663,10 +1663,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <div id="curl-info" class="tab-content">
                         <pre>curl -X POST -H "Content-Type: application/json" \\
      -d '{"ip":"10.2.0.65","action":"info"}' \\
-     http://localhost:8000/snmp_api.php</pre>
+     /snmp_api.php</pre>
                     </div>
                     <div id="url-info" class="tab-content">
-                        <pre>http://localhost:8000/snmp_api.php/info?ip=10.2.0.65</pre>
+                        <pre>/snmp_api.php/info?ip=10.2.0.65</pre>
                     </div>
                 </div>
             </div>
@@ -1711,10 +1711,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <div id="curl-get" class="tab-content">
                         <pre>curl -X POST -H "Content-Type: application/json" \\
      -d '{"ip":"10.2.0.65","action":"get","ports":"1-4"}' \\
-     http://localhost:8000/snmp_api.php</pre>
+     /snmp_api.php</pre>
                     </div>
                     <div id="url-get" class="tab-content">
-                        <pre>http://localhost:8000/snmp_api.php/get?ip=10.2.0.65&ports=1-4</pre>
+                        <pre>/snmp_api.php/get?ip=10.2.0.65&ports=1-4</pre>
                     </div>
                 </div>
             </div>
@@ -1750,10 +1750,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <div id="curl-add" class="tab-content">
                         <pre>curl -X POST -H "Content-Type: application/json" \\
      -d '{"ip":"10.2.0.65","action":"add","ports":"1-4","vlan":100,"tagged":false}' \\
-     http://localhost:8000/snmp_api.php</pre>
+     /snmp_api.php</pre>
                     </div>
                     <div id="url-add" class="tab-content">
-                        <pre>http://localhost:8000/snmp_api.php/add?ip=10.2.0.65&ports=1-4&vlan=100&tagged=0</pre>
+                        <pre>/snmp_api.php/add?ip=10.2.0.65&ports=1-4&vlan=100&tagged=0</pre>
                     </div>
                 </div>
             </div>
@@ -1794,10 +1794,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <div id="curl-remove" class="tab-content">
                         <pre>curl -X POST -H "Content-Type: application/json" \\
      -d '{"ip":"10.2.0.65","action":"remove","ports":"1-4","vlan":100}' \\
-     http://localhost:8000/snmp_api.php</pre>
+     /snmp_api.php</pre>
                     </div>
                     <div id="url-remove" class="tab-content">
-                        <pre>http://localhost:8000/snmp_api.php/remove?ip=10.2.0.65&ports=1-4&vlan=100</pre>
+                        <pre>/snmp_api.php/remove?ip=10.2.0.65&ports=1-4&vlan=100</pre>
                     </div>
                 </div>
             </div>
@@ -1843,10 +1843,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <div id="curl-interfaces" class="tab-content">
                         <pre>curl -X POST -H "Content-Type: application/json" \\
      -d '{"ip":"10.2.0.65","action":"interfaces"}' \\
-     http://localhost:8000/snmp_api.php</pre>
+     /snmp_api.php</pre>
                     </div>
                     <div id="url-interfaces" class="tab-content">
-                        <pre>http://localhost:8000/snmp_api.php/interfaces?ip=10.2.0.65</pre>
+                        <pre>/snmp_api.php/interfaces?ip=10.2.0.65</pre>
                     </div>
                 </div>
             </div>
@@ -1901,10 +1901,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <div id="curl-help" class="tab-content">
                         <pre>curl -X POST -H "Content-Type: application/json" \\
      -d '{"action":"help"}' \\
-     http://localhost:8000/snmp_api.php</pre>
+     /snmp_api.php</pre>
                     </div>
                     <div id="url-help" class="tab-content">
-                        <pre>http://localhost:8000/snmp_api.php/help</pre>
+                        <pre>/snmp_api.php/help</pre>
                     </div>
                 </div>
             </div>
@@ -1947,10 +1947,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <div id="curl-vlans" class="tab-content">
                         <pre>curl -X POST -H "Content-Type: application/json" \\
      -d '{"ip":"10.2.0.65","action":"vlans"}' \\
-     http://localhost:8000/snmp_api.php</pre>
+     /snmp_api.php</pre>
                     </div>
                     <div id="url-vlans" class="tab-content">
-                        <pre>http://localhost:8000/snmp_api.php/vlans?ip=10.2.0.65</pre>
+                        <pre>/snmp_api.php/vlans?ip=10.2.0.65</pre>
                     </div>
                 </div>
             </div>
@@ -1985,10 +1985,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <div id="curl-create" class="tab-content">
                         <pre>curl -X POST -H "Content-Type: application/json" \\
      -d '{"ip":"10.2.0.65","action":"create","vlan":100}' \\
-     http://localhost:8000/snmp_api.php</pre>
+     /snmp_api.php</pre>
                     </div>
                     <div id="url-create" class="tab-content">
-                        <pre>http://localhost:8000/snmp_api.php/create?ip=10.2.0.65&vlan=100</pre>
+                        <pre>/snmp_api.php/create?ip=10.2.0.65&vlan=100</pre>
                     </div>
                 </div>
             </div>
@@ -2028,10 +2028,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <div id="curl-delete" class="tab-content">
                         <pre>curl -X POST -H "Content-Type: application/json" \\
      -d '{"ip":"10.2.0.65","action":"delete","vlan":100}' \\
-     http://localhost:8000/snmp_api.php</pre>
+     /snmp_api.php</pre>
                     </div>
                     <div id="url-delete" class="tab-content">
-                        <pre>http://localhost:8000/snmp_api.php/delete?ip=10.2.0.65&vlan=100</pre>
+                        <pre>/snmp_api.php/delete?ip=10.2.0.65&vlan=100</pre>
                     </div>
                 </div>
             </div>
