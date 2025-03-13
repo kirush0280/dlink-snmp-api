@@ -1210,6 +1210,58 @@ if (php_sapi_name() === 'cli') {
                 }
                 break;
 
+            case 'update':
+                try {
+                    // Создаем временную директорию
+                    $tempDir = sys_get_temp_dir() . '/dlink-snmp-api-update-' . uniqid();
+                    mkdir($tempDir);
+                    
+                    // Клонируем репозиторий во временную директорию
+                    exec("git clone https://github.com/kirush0280/dlink-snmp-api.git $tempDir 2>&1", $output, $returnVar);
+                    
+                    if ($returnVar !== 0) {
+                        throw new Exception("Ошибка клонирования репозитория: " . implode("\n", $output));
+                    }
+                    
+                    // Сохраняем текущий config.php
+                    $currentConfig = file_get_contents('config.php');
+                    
+                    // Копируем файлы из временной директории
+                    $files = [
+                        'snmp_api.php',
+                        'Logger.php',
+                        'README.md'
+                    ];
+                    
+                    foreach ($files as $file) {
+                        if (file_exists($tempDir . '/' . $file)) {
+                            copy($tempDir . '/' . $file, $file);
+                        }
+                    }
+                    
+                    // Восстанавливаем config.php
+                    file_put_contents('config.php', $currentConfig);
+                    
+                    // Удаляем временную директорию
+                    array_map('unlink', glob("$tempDir/*.*"));
+                    rmdir($tempDir);
+                    
+                    echo json_encode([
+                        'success' => true,
+                        'message' => 'Скрипт успешно обновлен'
+                    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+                    exit;
+                    
+                } catch (Exception $e) {
+                    http_response_code(500);
+                    echo json_encode([
+                        'success' => false,
+                        'error' => $e->getMessage()
+                    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+                    exit;
+                }
+                break;
+
             default:
                 die("Неизвестное действие: $action\n");
         }
@@ -1352,6 +1404,58 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $result = $snmp->getVlanDetails();
                 break;
 
+            case 'update':
+                try {
+                    // Создаем временную директорию
+                    $tempDir = sys_get_temp_dir() . '/dlink-snmp-api-update-' . uniqid();
+                    mkdir($tempDir);
+                    
+                    // Клонируем репозиторий во временную директорию
+                    exec("git clone https://github.com/kirush0280/dlink-snmp-api.git $tempDir 2>&1", $output, $returnVar);
+                    
+                    if ($returnVar !== 0) {
+                        throw new Exception("Ошибка клонирования репозитория: " . implode("\n", $output));
+                    }
+                    
+                    // Сохраняем текущий config.php
+                    $currentConfig = file_get_contents('config.php');
+                    
+                    // Копируем файлы из временной директории
+                    $files = [
+                        'snmp_api.php',
+                        'Logger.php',
+                        'README.md'
+                    ];
+                    
+                    foreach ($files as $file) {
+                        if (file_exists($tempDir . '/' . $file)) {
+                            copy($tempDir . '/' . $file, $file);
+                        }
+                    }
+                    
+                    // Восстанавливаем config.php
+                    file_put_contents('config.php', $currentConfig);
+                    
+                    // Удаляем временную директорию
+                    array_map('unlink', glob("$tempDir/*.*"));
+                    rmdir($tempDir);
+                    
+                    echo json_encode([
+                        'success' => true,
+                        'message' => 'Скрипт успешно обновлен'
+                    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+                    exit;
+                    
+                } catch (Exception $e) {
+                    http_response_code(500);
+                    echo json_encode([
+                        'success' => false,
+                        'error' => $e->getMessage()
+                    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+                    exit;
+                }
+                break;
+
             default:
                 throw new Exception("Неизвестное действие");
         }
@@ -1471,11 +1575,64 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             border-radius: 4px;
             color: #333;
         }
+        .notes {
+            margin: 10px 0;
+            padding: 10px;
+            background: #fff3cd;
+            border: 1px solid #ffeeba;
+            border-radius: 4px;
+        }
+        .notes p {
+            margin: 5px 0;
+            color: #856404;
+        }
+        .notes strong {
+            color: #533f03;
+        }
+        .update-section {
+            margin: 20px 0;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            border: 1px solid #dee2e6;
+        }
+        .update-button {
+            background: #28a745;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .update-button:hover {
+            background: #218838;
+        }
+        #update-status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+            display: none;
+        }
+        .update-success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .update-error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>D-Link SNMP API</h1>
+        <div class="update-section">
+            <button onclick="updateFromGitHub()" class="update-button">Обновить скрипт с GitHub</button>
+            <div id="update-status"></div>
+        </div>
         <div class="endpoint">
             <h3>Получение информации о коммутаторе</h3>
             <div class="method">GET /snmp_api.php/info</div>
@@ -1900,6 +2057,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             .notes strong {
                 color: #533f03;
             }
+            .update-section {
+                margin: 20px 0;
+                padding: 15px;
+                background: #f8f9fa;
+                border-radius: 4px;
+                border: 1px solid #dee2e6;
+            }
+            .update-button {
+                background: #28a745;
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 14px;
+            }
+            .update-button:hover {
+                background: #218838;
+            }
+            #update-status {
+                margin-top: 10px;
+                padding: 10px;
+                border-radius: 4px;
+                display: none;
+            }
+            .update-success {
+                background: #d4edda;
+                color: #155724;
+                border: 1px solid #c3e6cb;
+            }
+            .update-error {
+                background: #f8d7da;
+                color: #721c24;
+                border: 1px solid #f5c6cb;
+            }
         </style>
         
         <div id="result"></div>
@@ -1950,6 +2142,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             document.getElementById("result").textContent = JSON.stringify(data, null, 2);
         } catch (err) {
             document.getElementById("result").textContent = "Ошибка: " + (err.message || "Неизвестная ошибка");
+        }
+    }
+    
+    async function updateFromGitHub() {
+        const statusDiv = document.getElementById('update-status');
+        statusDiv.style.display = 'block';
+        statusDiv.className = '';
+        statusDiv.textContent = 'Обновление...';
+        
+        try {
+            const response = await fetch('/snmp_api.php/update');
+            const data = await response.json();
+            
+            if (data.success) {
+                statusDiv.className = 'update-success';
+                statusDiv.textContent = 'Скрипт успешно обновлен!';
+                setTimeout(() => {
+                    window.location.reload();
+                }, 2000);
+            } else {
+                statusDiv.className = 'update-error';
+                statusDiv.textContent = 'Ошибка обновления: ' + data.error;
+            }
+        } catch (err) {
+            statusDiv.className = 'update-error';
+            statusDiv.textContent = 'Ошибка при обновлении: ' + err.message;
         }
     }
     </script>
@@ -2081,6 +2299,58 @@ HTML;
 
             case 'vlans':
                 $result = $snmp->getVlanDetails();
+                break;
+
+            case 'update':
+                try {
+                    // Создаем временную директорию
+                    $tempDir = sys_get_temp_dir() . '/dlink-snmp-api-update-' . uniqid();
+                    mkdir($tempDir);
+                    
+                    // Клонируем репозиторий во временную директорию
+                    exec("git clone https://github.com/kirush0280/dlink-snmp-api.git $tempDir 2>&1", $output, $returnVar);
+                    
+                    if ($returnVar !== 0) {
+                        throw new Exception("Ошибка клонирования репозитория: " . implode("\n", $output));
+                    }
+                    
+                    // Сохраняем текущий config.php
+                    $currentConfig = file_get_contents('config.php');
+                    
+                    // Копируем файлы из временной директории
+                    $files = [
+                        'snmp_api.php',
+                        'Logger.php',
+                        'README.md'
+                    ];
+                    
+                    foreach ($files as $file) {
+                        if (file_exists($tempDir . '/' . $file)) {
+                            copy($tempDir . '/' . $file, $file);
+                        }
+                    }
+                    
+                    // Восстанавливаем config.php
+                    file_put_contents('config.php', $currentConfig);
+                    
+                    // Удаляем временную директорию
+                    array_map('unlink', glob("$tempDir/*.*"));
+                    rmdir($tempDir);
+                    
+                    echo json_encode([
+                        'success' => true,
+                        'message' => 'Скрипт успешно обновлен'
+                    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+                    exit;
+                    
+                } catch (Exception $e) {
+                    http_response_code(500);
+                    echo json_encode([
+                        'success' => false,
+                        'error' => $e->getMessage()
+                    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+                    exit;
+                }
                 break;
 
             default:
